@@ -126,11 +126,14 @@ DAILYROUTE_DB_PATH=data/dailyroute_guard.db
 
 - 키 없이 동작: 일정 추출, 일정 저장, 중복 경고, SQLite 저장, 모의 이동시간, 모의 경유지 추천, 경로 감시 로그
 - `KAKAO_REST_API_KEY`가 있으면 카카오 OAuth 로그인 URL을 만들 수 있고, 카카오 Local 장소 검색을 실제 API로 시도합니다.
+- `KAKAO_MOBILITY_API_KEY`는 비워도 `KAKAO_REST_API_KEY`를 자동차 길찾기 API 키로 사용합니다. 분리 관리하고 싶으면 같은 REST API 키를 `KAKAO_MOBILITY_API_KEY`에도 넣으면 됩니다.
 - `KAKAO_REDIRECT_URI`는 카카오 Developers에 등록한 Redirect URI와 정확히 같아야 합니다.
 - `KAKAO_CLIENT_SECRET`이 켜져 있는 앱이면 token 발급 때 필요합니다.
 - `KAKAO_OAUTH_SCOPES` 기본값은 `talk_message`입니다. 톡캘린더 권한을 추가 동의로 요청해야 하는 앱이면 카카오 Developers에서 확인한 scope ID를 함께 넣으세요.
 - OAuth 로그인 후 저장된 access token으로 `save_schedule(save_to_talk_calendar=true)`는 톡캘린더 생성 API를, `build_daily_route_briefing(send_to_me=true)`와 route watch 알림은 나에게 보내기 API를 시도합니다.
-- 실제 이동시간 조회는 별도의 `KAKAO_MOBILITY_API_KEY` 연동 영역입니다. 키가 없거나 아직 Mobility 호출을 켜지 않으면 모의 이동시간을 사용합니다.
+- `check_day_feasibility`에서 `travel_mode="car"`이면 카카오모빌리티 자동차 길찾기 API로 차량 이동시간을 시도합니다.
+- `travel_mode="transit_estimate"` 또는 `walking_estimate`이면 카카오 Local 좌표 조회 후 거리 기반 대중교통/도보 예상시간을 계산합니다. 공개 자동차 길찾기 API와 달리 실시간 대중교통 경로 검색은 아니므로 결과에 provider가 표시됩니다.
+- 키가 없거나 API 권한 오류가 나면 fallback 모의 이동시간으로 안전하게 내려갑니다.
 - MVP에서는 이미지 OCR을 서버 안에서 직접 수행하지 않습니다. 이미지에서 OCR된 텍스트를 `extract_schedule_from_text`의 `text`에 넣어 테스트하세요.
 
 ### 카카오 로그인 흐름
@@ -165,7 +168,7 @@ DAILYROUTE_DB_PATH=data/dailyroute_guard.db
 
 흐름: `check_day_feasibility`
 
-기대 결과: 안양에서 강남까지 모의 이동시간 48분이 필요해 지각 위험이 높다고 경고합니다.
+기대 결과: API 키가 있으면 차량 이동시간을 실제 길찾기로 시도하고, 키가 없으면 안양에서 강남까지 모의 차량 이동시간 48분이 필요해 지각 위험이 높다고 경고합니다.
 
 ### 시나리오 4: 퇴근길 심부름 경유지 추천
 
@@ -181,4 +184,4 @@ DAILYROUTE_DB_PATH=data/dailyroute_guard.db
 
 흐름: `create_route_watch` → `get_route_alerts`
 
-기대 결과: 남은 시간과 모의 이동시간을 비교해 지각 위험이 있으면 `route_check_logs`에 경고가 저장됩니다.
+기대 결과: 남은 시간과 차량 이동시간을 비교해 지각 위험이 있으면 `route_check_logs`에 경고가 저장됩니다. API 키가 없으면 모의 차량 이동시간을 사용합니다.

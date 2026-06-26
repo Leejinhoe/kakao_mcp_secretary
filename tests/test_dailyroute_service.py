@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import dailyroute_service
 from dailyroute_service import DailyRouteService
 
 
@@ -184,7 +185,7 @@ def test_check_day_feasibility_warns_for_impossible_route(tmp_path: Path) -> Non
 
     assert result["feasible"] is False
     assert result["day_risk_level"] == "high"
-    assert any("안양에서 강남까지 예상 이동 시간이 48분" in warning for warning in result["warnings"])
+    assert any("안양에서 강남까지 모의 차량 이동시간 기준 예상 이동 시간이 48분" in warning for warning in result["warnings"])
 
 
 def test_find_places_on_route_returns_mock_stops(tmp_path: Path) -> None:
@@ -302,3 +303,86 @@ def test_kakao_token_storage_can_feed_api_callers(tmp_path: Path) -> None:
     assert token["available"] is True
     assert token["access_token"] == "access_for_test"
     assert service.kakao_auth_status("test")["authenticated"] is True
+
+
+def test_check_day_feasibility_uses_selected_travel_mode(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+    service.save_schedule(
+        workspace_id="test",
+        title="안양 미팅",
+        start_at="2026-06-27T14:00:00+09:00",
+        end_at="2026-06-27T14:00:00+09:00",
+        date_text="2026-06-27",
+        time_text="오후 2시",
+        location_text="안양",
+        schedule_type="meeting",
+        source_type="manual",
+        reminder_minutes=60,
+        save_to_talk_calendar=False,
+        allow_conflict=False,
+    )
+    service.save_schedule(
+        workspace_id="test",
+        title="강남 미팅",
+        start_at="2026-06-27T14:30:00+09:00",
+        end_at="2026-06-27T15:30:00+09:00",
+        date_text="2026-06-27",
+        time_text="오후 2시 30분",
+        location_text="강남",
+        schedule_type="meeting",
+        source_type="manual",
+        reminder_minutes=60,
+        save_to_talk_calendar=False,
+        allow_conflict=False,
+    )
+
+    result = service.check_day_feasibility(
+        workspace_id="test",
+        target_date="2026-06-27",
+        default_origin="집",
+        travel_mode="walking_estimate",
+        buffer_minutes=15,
+    )
+
+    assert result["route_checks"][0]["travel_mode"] == "walking_estimate"
+    assert result["route_checks"][0]["provider_mode"] == "모의 도보 이동시간"
+
+
+def test_car_route_uses_rest_key_when_mobility_key_is_empty(monkeypatch) -> None:
+    calls: list[dict] = []
+    monkeypatch.setenv("ENABLE_REAL_KAKAO_APIS", "true")
+    monkeypatch.setenv("KAKAO_REST_API_KEY", "rest_key_for_route")
+    monkeypatch.delenv("KAKAO_MOBILITY_API_KEY", raising=False)
+
+    def fake_coordinates(place_text: str) -> dict:
+        return {
+            "place_text": place_text,
+            "lat": 37.5 if place_text == "회사" else 37.51,
+            "lng": 127.0 if place_text == "회사" else 127.02,
+            "mock": False,
+        }
+
+    def fake_get_json(url: str, params: dict, headers: dict | None = None) -> dict:
+        calls.append({"url": url, "params": params, "headers": headers or {}})
+        return {
+            "ok": True,
+            "status": 200,
+            "json": {
+                "routes": [
+                    {
+                        "result_code": 0,
+                        "summary": {"duration": 600, "distance": 5000, "fare": {}},
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(dailyroute_service, "resolve_address_or_place_to_coordinates", fake_coordinates)
+    monkeypatch.setattr(dailyroute_service, "_get_json", fake_get_json)
+
+    result = dailyroute_service.estimate_route_duration("회사", "집", travel_mode="car")
+
+    assert result["duration_minutes"] == 10
+    assert result["distance_meters"] == 5000
+    assert result["provider"] == "kakao_mobility_directions"
+    assert calls[0]["headers"]["Authorization"] == "KakaoAK rest_key_for_route"

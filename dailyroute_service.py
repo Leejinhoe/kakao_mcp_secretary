@@ -7,6 +7,7 @@ import sqlite3
 import urllib.error
 import urllib.parse
 import urllib.request
+from math import asin, cos, radians, sin, sqrt
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -22,6 +23,7 @@ KAKAO_CALENDAR_CREATE_EVENT_URL = "https://kapi.kakao.com/v2/api/calendar/create
 KAKAO_TALK_MEMO_SEND_URL = "https://kapi.kakao.com/v2/api/talk/memo/default/send"
 KAKAO_LOCAL_KEYWORD_URL = "https://dapi.kakao.com/v2/local/search/keyword.json"
 KAKAO_LOCAL_ADDRESS_URL = "https://dapi.kakao.com/v2/local/search/address.json"
+KAKAO_MOBILITY_DIRECTIONS_URL = "https://apis-navi.kakaomobility.com/v1/directions"
 
 ScheduleType = Literal["meeting", "deadline", "appointment", "personal", "routine", "errand", "other"]
 ScheduleSourceType = Literal["text", "ocr_text", "manual", "calendar", "other"]
@@ -289,6 +291,18 @@ def _mock_mode() -> bool:
     return not _env_enabled("ENABLE_REAL_KAKAO_APIS")
 
 
+def _rest_api_key() -> str:
+    return os.getenv("KAKAO_REST_API_KEY", "")
+
+
+def _mobility_api_key() -> str:
+    return os.getenv("KAKAO_MOBILITY_API_KEY") or _rest_api_key()
+
+
+def _local_api_key() -> str:
+    return _rest_api_key() or os.getenv("KAKAO_MOBILITY_API_KEY", "")
+
+
 def _public_base_url() -> str:
     return os.getenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 
@@ -504,34 +518,134 @@ def _area_token(place: str) -> str:
     return _normalize_spaces(place)[:2]
 
 
-def estimate_route_duration(origin: str, destination: str, waypoints: list[str] | None = None) -> dict[str, Any]:
-    waypoints = waypoints or []
-    if _mock_mode() or not os.getenv("KAKAO_MOBILITY_API_KEY"):
-        locations = [origin, *waypoints, destination]
-        total = 0
-        for start, end in zip(locations, locations[1:]):
-            start_area = _area_token(start)
-            end_area = _area_token(end)
-            if not start or not end:
-                total += 40
-            elif start_area == end_area:
-                total += 15
-            elif {start_area, end_area} == {"안양", "강남"}:
-                total += 48
-            elif start_area in {"강남", "역삼", "판교"} and end_area in {"강남", "역삼", "판교"}:
-                total += 30
-            else:
-                total += 50
-        return {
-            "duration_minutes": total or 40,
-            "mode": "모의 이동시간",
-            "provider": "fallback",
-        }
+def _haversine_km(start: dict[str, Any], end: dict[str, Any]) -> float:
+    lat1 = radians(float(start.get("lat") or 0))
+    lng1 = radians(float(start.get("lng") or 0))
+    lat2 = radians(float(end.get("lat") or 0))
+    lng2 = radians(float(end.get("lng") or 0))
+    delta_lat = lat2 - lat1
+    delta_lng = lng2 - lng1
+    a = sin(delta_lat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(delta_lng / 2) ** 2
+    return 6371.0 * 2 * asin(sqrt(a))
+
+
+def _fallback_route_duration(origin: str, destination: str, waypoints: list[str], travel_mode: TravelMode) -> dict[str, Any]:
+    locations = [origin, *waypoints, destination]
+    total = 0
+    for start, end in zip(locations, locations[1:]):
+        start_area = _area_token(start)
+        end_area = _area_token(end)
+        if not start or not end:
+            total += 40
+        elif start_area == end_area:
+            total += 15
+        elif {start_area, end_area} == {"안양", "강남"}:
+            total += 48
+        elif start_area in {"강남", "역삼", "판교"} and end_area in {"강남", "역삼", "판교"}:
+            total += 30
+        else:
+            total += 50
+    multiplier = {"car": 1.0, "transit_estimate": 1.25, "walking_estimate": 2.8}.get(travel_mode, 1.0)
     return {
-        "duration_minutes": 40,
-        "mode": "API 어댑터 미구현",
-        "provider": "kakao_mobility_placeholder",
+        "duration_minutes": max(1, int((total or 40) * multiplier)),
+        "distance_meters": 0,
+        "mode": {
+            "car": "모의 차량 이동시간",
+            "transit_estimate": "모의 대중교통 이동시간",
+            "walking_estimate": "모의 도보 이동시간",
+        }.get(travel_mode, "모의 이동시간"),
+        "provider": "fallback",
+        "travel_mode": travel_mode,
     }
+
+
+def _coordinate_route_duration(origin: str, destination: str, waypoints: list[str], travel_mode: TravelMode) -> dict[str, Any]:
+    coordinates = [resolve_address_or_place_to_coordinates(place) for place in [origin, *waypoints, destination]]
+    if any(item.get("mock") for item in coordinates):
+        return _fallback_route_duration(origin, destination, waypoints, travel_mode)
+    total_km = sum(_haversine_km(start, end) for start, end in zip(coordinates, coordinates[1:]))
+    if travel_mode == "walking_estimate":
+        minutes = int((total_km / 4.5) * 60)
+        mode = "카카오 Local 좌표 기반 도보 예상시간"
+    else:
+        minutes = int((total_km / 24) * 60) + 10
+        mode = "카카오 Local 좌표 기반 대중교통 예상시간"
+    return {
+        "duration_minutes": max(1, minutes),
+        "distance_meters": int(total_km * 1000),
+        "mode": mode,
+        "provider": "kakao_local_distance_estimate",
+        "travel_mode": travel_mode,
+        "note": "대중교통/도보는 공개 자동차 길찾기 API가 아니라 좌표 거리 기반 예상치입니다.",
+    }
+
+
+def _car_route_duration(origin: str, destination: str, waypoints: list[str]) -> dict[str, Any]:
+    api_key = _mobility_api_key()
+    if _mock_mode() or not api_key:
+        return _fallback_route_duration(origin, destination, waypoints, "car")
+    coordinates = [resolve_address_or_place_to_coordinates(place) for place in [origin, *waypoints, destination]]
+    if any(item.get("mock") for item in coordinates):
+        return _fallback_route_duration(origin, destination, waypoints, "car")
+    origin_coord = coordinates[0]
+    destination_coord = coordinates[-1]
+    waypoint_coords = coordinates[1:-1]
+    params: dict[str, Any] = {
+        "origin": f"{origin_coord['lng']},{origin_coord['lat']},name={origin}",
+        "destination": f"{destination_coord['lng']},{destination_coord['lat']},name={destination}",
+        "priority": "RECOMMEND",
+        "summary": "true",
+        "alternatives": "false",
+        "road_details": "false",
+    }
+    if waypoint_coords:
+        params["waypoints"] = "|".join(
+            f"{coord['lng']},{coord['lat']},name={place}"
+            for coord, place in zip(waypoint_coords, waypoints)
+        )
+    result = _get_json(
+        KAKAO_MOBILITY_DIRECTIONS_URL,
+        params,
+        {"Authorization": f"KakaoAK {api_key}", "Content-Type": "application/json"},
+    )
+    if result["ok"]:
+        routes = result["json"].get("routes", [])
+        if routes:
+            route = routes[0]
+            summary = route.get("summary", {})
+            if route.get("result_code", 0) == 0 and summary.get("duration") is not None:
+                return {
+                    "duration_minutes": max(1, int((int(summary.get("duration", 0)) + 59) // 60)),
+                    "distance_meters": int(summary.get("distance", 0) or 0),
+                    "mode": "카카오모빌리티 자동차 길찾기",
+                    "provider": "kakao_mobility_directions",
+                    "travel_mode": "car",
+                    "fare": summary.get("fare", {}),
+                }
+            return {
+                **_fallback_route_duration(origin, destination, waypoints, "car"),
+                "provider": "fallback_after_kakao_mobility_error",
+                "error": route.get("result_msg", "길찾기 결과가 없습니다."),
+            }
+    return {
+        **_fallback_route_duration(origin, destination, waypoints, "car"),
+        "provider": "fallback_after_kakao_mobility_error",
+        "error": result.get("error"),
+    }
+
+
+def estimate_route_duration(
+    origin: str,
+    destination: str,
+    waypoints: list[str] | None = None,
+    travel_mode: TravelMode = "car",
+) -> dict[str, Any]:
+    waypoints = waypoints or []
+    if travel_mode == "car":
+        return _car_route_duration(origin, destination, waypoints)
+    if _mock_mode() or not _local_api_key():
+        return _fallback_route_duration(origin, destination, waypoints, travel_mode)
+    return _coordinate_route_duration(origin, destination, waypoints, travel_mode)
 
 
 def _errand_category(errand: str) -> tuple[str, str]:
@@ -550,7 +664,8 @@ def _errand_category(errand: str) -> tuple[str, str]:
 
 def search_place_keyword(keyword: str, area: str = "") -> list[dict[str, Any]]:
     search_area = area or "주변"
-    if _mock_mode() or not os.getenv("KAKAO_REST_API_KEY"):
+    local_key = _local_api_key()
+    if _mock_mode() or not local_key:
         return [
             {
                 "name": f"{search_area} {keyword} 후보",
@@ -562,7 +677,7 @@ def search_place_keyword(keyword: str, area: str = "") -> list[dict[str, Any]]:
     result = _get_json(
         KAKAO_LOCAL_KEYWORD_URL,
         {"query": f"{search_area} {keyword}", "size": 5},
-        {"Authorization": f"KakaoAK {os.getenv('KAKAO_REST_API_KEY')}"},
+        {"Authorization": f"KakaoAK {local_key}"},
     )
     if result["ok"]:
         places = []
@@ -592,7 +707,8 @@ def search_place_keyword(keyword: str, area: str = "") -> list[dict[str, Any]]:
 
 
 def resolve_address_or_place_to_coordinates(place_text: str) -> dict[str, Any]:
-    if _mock_mode() or not os.getenv("KAKAO_REST_API_KEY"):
+    local_key = _local_api_key()
+    if _mock_mode() or not local_key:
         token = _area_token(place_text)
         return {
             "place_text": place_text,
@@ -605,7 +721,7 @@ def resolve_address_or_place_to_coordinates(place_text: str) -> dict[str, Any]:
     result = _get_json(
         KAKAO_LOCAL_ADDRESS_URL,
         {"query": place_text, "size": 1},
-        {"Authorization": f"KakaoAK {os.getenv('KAKAO_REST_API_KEY')}"},
+        {"Authorization": f"KakaoAK {local_key}"},
     )
     if result["ok"] and result["json"].get("documents"):
         document = result["json"]["documents"][0]
@@ -616,6 +732,23 @@ def resolve_address_or_place_to_coordinates(place_text: str) -> dict[str, Any]:
             "area_token": _area_token(document.get("address_name", place_text)),
             "mock": False,
             "warning": None,
+        }
+    keyword_result = _get_json(
+        KAKAO_LOCAL_KEYWORD_URL,
+        {"query": place_text, "size": 1},
+        {"Authorization": f"KakaoAK {local_key}"},
+    )
+    if keyword_result["ok"] and keyword_result["json"].get("documents"):
+        document = keyword_result["json"]["documents"][0]
+        return {
+            "place_text": place_text,
+            "lat": float(document.get("y") or 0),
+            "lng": float(document.get("x") or 0),
+            "area_token": _area_token(document.get("address_name", place_text)),
+            "mock": False,
+            "warning": None,
+            "place_name": document.get("place_name", ""),
+            "address": document.get("road_address_name") or document.get("address_name", ""),
         }
     return {
         "place_text": place_text,
@@ -635,7 +768,7 @@ def search_places_by_category_or_keyword(
 ) -> list[dict[str, Any]]:
     category, label = _errand_category(errand)
     area = preferred_area or _area_token(destination) or _area_token(origin)
-    if _mock_mode() or not os.getenv("KAKAO_REST_API_KEY"):
+    if _mock_mode() or not _local_api_key():
         return [
             {
                 "name": f"{area} 추천 {label}",
@@ -1273,7 +1406,7 @@ class DailyRouteService:
             prev_end = _parse_iso_datetime(previous.get("end_at", ""))
             next_start = _parse_iso_datetime(schedule.get("start_at", ""))
             available_gap = int((next_start - prev_end).total_seconds() // 60) if prev_end and next_start else 0
-            route = estimate_route_duration(prev_location, next_location)
+            route = estimate_route_duration(prev_location, next_location, travel_mode=travel_mode)
             required = route["duration_minutes"] + buffer_minutes
             risk = required > available_gap
             check = {
@@ -1283,14 +1416,17 @@ class DailyRouteService:
                 "destination": next_location,
                 "available_gap_minutes": available_gap,
                 "estimated_travel_minutes": route["duration_minutes"],
+                "distance_meters": route.get("distance_meters", 0),
                 "buffer_minutes": buffer_minutes,
                 "provider_mode": route["mode"],
+                "provider": route.get("provider", ""),
+                "travel_mode": route.get("travel_mode", travel_mode),
                 "risk": risk,
             }
             route_checks.append(check)
             if risk:
                 message = (
-                    f"{prev_location}에서 {next_location}까지 예상 이동 시간이 {route['duration_minutes']}분인데 "
+                    f"{prev_location}에서 {next_location}까지 {route['mode']} 기준 예상 이동 시간이 {route['duration_minutes']}분인데 "
                     f"일정 사이 여유가 {available_gap}분뿐이라 지각 가능성이 높습니다."
                 )
                 warnings.append(message)
@@ -1331,7 +1467,7 @@ class DailyRouteService:
         stops = [place["name"] for place in selected_places]
         recommended_route = " → ".join([origin, *stops, destination])
         estimated_extra_time = sum(place["estimated_detour_minutes"] for place in selected_places)
-        warning = "카카오 Local API 키가 없어 모의 장소 추천을 반환했습니다." if _mock_mode() or not os.getenv("KAKAO_REST_API_KEY") else None
+        warning = "카카오 Local API 키가 없어 모의 장소 추천을 반환했습니다." if _mock_mode() or not _local_api_key() else None
         return {
             "recommended_route": recommended_route,
             "selected_places": selected_places,
