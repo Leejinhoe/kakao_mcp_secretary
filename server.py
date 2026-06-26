@@ -25,8 +25,8 @@ DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8000
 ExtractScheduleSourceType = Literal["text", "ocr_text", "manual", "other"]
 SaveScheduleSourceType = Literal["text", "ocr_text", "manual", "calendar", "other"]
-RouteProfileAction = Literal["save", "list"]
-ErrandAction = Literal["save", "list"]
+RoutePreferenceTarget = Literal["route_profile", "errand", "routine"]
+RoutePreferenceAction = Literal["save", "list"]
 
 
 def _env_int(name: str, default: int) -> int:
@@ -101,30 +101,21 @@ class PlacesOnRouteResult(BaseModel):
     summary: str
 
 
-class SaveRoutineResult(BaseModel):
-    saved: bool
-    routine_id: str
-    summary: str
-    how_it_will_be_used: str
-
-
-class RouteProfileToolResult(BaseModel):
+class RoutePreferenceToolResult(BaseModel):
+    target: str
     action: str
     saved: bool = False
     profile_id: str = ""
     profile: dict = Field(default_factory=dict)
     profiles: list[dict] = Field(default_factory=list)
-    summary: str
-    warning: str | None = None
-
-
-class ErrandToolResult(BaseModel):
-    action: str
-    saved: bool = False
     errand_id: str = ""
     errand: dict = Field(default_factory=dict)
     errands: list[dict] = Field(default_factory=list)
+    routine_id: str = ""
+    routine: dict = Field(default_factory=dict)
+    routines: list[dict] = Field(default_factory=list)
     summary: str
+    how_it_will_be_used: str = ""
     warning: str | None = None
 
 
@@ -420,123 +411,112 @@ def find_places_on_route(
 
 
 @mcp.tool(
-    name="manage_route_profile",
-    description="Save or list route profiles such as home-to-office or office-to-home preferences.",
+    name="manage_route_preferences",
+    description="Save or list route profiles, errands, and daily-life routines.",
     annotations=ToolAnnotations(
-        title="동선 프로필 저장/조회",
+        title="동선 선호 저장/조회",
         readOnlyHint=False,
         destructiveHint=False,
         idempotentHint=False,
         openWorldHint=False,
     ),
 )
-def manage_route_profile(
-    action: RouteProfileAction = Field(description="수행할 작업입니다. save 또는 list입니다."),
+def manage_route_preferences(
+    target: RoutePreferenceTarget = Field(description="관리할 대상입니다. route_profile, errand, routine 중 하나입니다."),
+    action: RoutePreferenceAction = Field(description="수행할 작업입니다. save 또는 list입니다."),
     workspace_id: str = Field(default=DEFAULT_WORKSPACE_ID, description="워크스페이스 ID입니다. 기본값은 default입니다."),
-    profile_name: str = Field(default="", description="저장할 동선 프로필 이름입니다. 예: 평일 출근길"),
-    origin: str = Field(default="", description="기본 출발지입니다."),
-    destination: str = Field(default="", description="기본 도착지입니다."),
-    preferences: dict = Field(default_factory=dict, description="선호 조건입니다. 예: {'avoid': ['도보 많은 경로'], 'buffer_minutes': 20}"),
-    limit: int = Field(default=20, description="list 작업에서 조회할 최대 개수입니다."),
-) -> RouteProfileToolResult:
-    if action == "save":
-        if not profile_name:
-            return RouteProfileToolResult(
-                action=action,
-                summary="동선 프로필 이름이 필요합니다.",
-                warning="profile_name을 입력해 주세요.",
-            )
-        return RouteProfileToolResult(
-            action=action,
-            **service.save_route_profile(
-                workspace_id=workspace_id,
-                profile_name=profile_name,
-                origin=origin,
-                destination=destination,
-                preferences=preferences,
-            ),
-        )
-    return RouteProfileToolResult(
-        action=action,
-        **service.list_route_profiles(workspace_id=workspace_id, limit=limit),
-    )
-
-
-@mcp.tool(
-    name="manage_errand",
-    description="Save or list errands used for route stop recommendations.",
-    annotations=ToolAnnotations(
-        title="심부름 저장/조회",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False,
-    ),
-)
-def manage_errand(
-    action: ErrandAction = Field(description="수행할 작업입니다. save 또는 list입니다."),
-    workspace_id: str = Field(default=DEFAULT_WORKSPACE_ID, description="워크스페이스 ID입니다. 기본값은 default입니다."),
-    errand_text: str = Field(default="", description="저장할 심부름 내용입니다. 예: 약국 들르기"),
-    category: str = Field(default="", description="심부름 카테고리입니다. 비우면 내용에서 자동 추정합니다."),
-    preferred_area: str = Field(default="", description="선호 지역입니다. 예: 강남, 회사 근처"),
-    limit: int = Field(default=20, description="list 작업에서 조회할 최대 개수입니다."),
-) -> ErrandToolResult:
-    if action == "save":
-        if not errand_text:
-            return ErrandToolResult(
-                action=action,
-                summary="심부름 내용이 필요합니다.",
-                warning="errand_text를 입력해 주세요.",
-            )
-        return ErrandToolResult(
-            action=action,
-            **service.save_errand(
-                workspace_id=workspace_id,
-                errand_text=errand_text,
-                category=category,
-                preferred_area=preferred_area,
-            ),
-        )
-    return ErrandToolResult(
-        action=action,
-        **service.list_errands(workspace_id=workspace_id, limit=limit),
-    )
-
-
-@mcp.tool(
-    name="save_routine",
-    description="Save daily-life route routines and preferences.",
-    annotations=ToolAnnotations(
-        title="생활 루틴 저장",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False,
-    ),
-)
-def save_routine(
-    workspace_id: str = Field(default=DEFAULT_WORKSPACE_ID, description="워크스페이스 ID입니다. 기본값은 default입니다."),
-    routine_name: str = Field(description="루틴 이름입니다."),
+    profile_name: str = Field(default="", description="route_profile 저장 시 사용할 동선 프로필 이름입니다."),
+    errand_text: str = Field(default="", description="errand 저장 시 사용할 심부름 내용입니다."),
+    category: str = Field(default="", description="errand 카테고리입니다. 비우면 내용에서 자동 추정합니다."),
+    preferred_area: str = Field(default="", description="errand 선호 지역입니다."),
+    routine_name: str = Field(default="", description="routine 저장 시 사용할 루틴 이름입니다."),
     routine_type: RoutineType = Field(default="custom", description="루틴 유형입니다."),
-    rule_text: str = Field(description="루틴 규칙 설명입니다."),
+    rule_text: str = Field(default="", description="routine 규칙 설명입니다."),
     active_days: list[str] = Field(default_factory=list, description="활성 요일입니다. 예: mon, wed, fri"),
     origin: str = Field(default="", description="기본 출발지입니다."),
     destination: str = Field(default="", description="기본 도착지입니다."),
     preferred_buffer_minutes: int | None = Field(default=None, description="선호 여유 시간입니다."),
     avoid_conditions: list[str] = Field(default_factory=list, description="피하고 싶은 조건입니다."),
-) -> SaveRoutineResult:
-    return SaveRoutineResult(
-        **service.save_routine(
-            workspace_id=workspace_id,
-            routine_name=routine_name,
-            routine_type=routine_type,
-            rule_text=rule_text,
-            active_days=active_days,
-            origin=origin,
-            destination=destination,
-            preferred_buffer_minutes=preferred_buffer_minutes,
-            avoid_conditions=avoid_conditions,
+    preferences: dict = Field(default_factory=dict, description="route_profile 선호 조건입니다."),
+    limit: int = Field(default=20, description="list 작업에서 조회할 최대 개수입니다."),
+) -> RoutePreferenceToolResult:
+    workspace_id = workspace_id if isinstance(workspace_id, str) else DEFAULT_WORKSPACE_ID
+    profile_name = profile_name if isinstance(profile_name, str) else ""
+    errand_text = errand_text if isinstance(errand_text, str) else ""
+    category = category if isinstance(category, str) else ""
+    preferred_area = preferred_area if isinstance(preferred_area, str) else ""
+    routine_name = routine_name if isinstance(routine_name, str) else ""
+    routine_type = routine_type if isinstance(routine_type, str) else "custom"
+    rule_text = rule_text if isinstance(rule_text, str) else ""
+    origin = origin if isinstance(origin, str) else ""
+    destination = destination if isinstance(destination, str) else ""
+    active_days = active_days if isinstance(active_days, list) else []
+    avoid_conditions = avoid_conditions if isinstance(avoid_conditions, list) else []
+    preferences = preferences if isinstance(preferences, dict) else {}
+    preferred_buffer_minutes = preferred_buffer_minutes if isinstance(preferred_buffer_minutes, int) else None
+    limit = limit if isinstance(limit, int) else 20
+
+    if target == "route_profile":
+        if action == "save":
+            if not profile_name:
+                return RoutePreferenceToolResult(target=target, action=action, summary="동선 프로필 이름이 필요합니다.", warning="profile_name을 입력해 주세요.")
+            return RoutePreferenceToolResult(
+                target=target,
+                action=action,
+                **service.save_route_profile(
+                    workspace_id=workspace_id,
+                    profile_name=profile_name,
+                    origin=origin,
+                    destination=destination,
+                    preferences=preferences,
+                ),
+            )
+        return RoutePreferenceToolResult(
+            target=target,
+            action=action,
+            **service.list_route_profiles(workspace_id=workspace_id, limit=limit),
         )
+    if target == "errand":
+        if action == "save":
+            if not errand_text:
+                return RoutePreferenceToolResult(target=target, action=action, summary="심부름 내용이 필요합니다.", warning="errand_text를 입력해 주세요.")
+            return RoutePreferenceToolResult(
+                target=target,
+                action=action,
+                **service.save_errand(
+                    workspace_id=workspace_id,
+                    errand_text=errand_text,
+                    category=category,
+                    preferred_area=preferred_area,
+                ),
+            )
+        return RoutePreferenceToolResult(
+            target=target,
+            action=action,
+            **service.list_errands(workspace_id=workspace_id, limit=limit),
+        )
+    if action == "save":
+        if not routine_name or not rule_text:
+            return RoutePreferenceToolResult(target=target, action=action, summary="루틴 이름과 규칙 설명이 필요합니다.", warning="routine_name과 rule_text를 입력해 주세요.")
+        return RoutePreferenceToolResult(
+            target=target,
+            action=action,
+            **service.save_routine(
+                workspace_id=workspace_id,
+                routine_name=routine_name,
+                routine_type=routine_type,
+                rule_text=rule_text,
+                active_days=active_days,
+                origin=origin,
+                destination=destination,
+                preferred_buffer_minutes=preferred_buffer_minutes,
+                avoid_conditions=avoid_conditions,
+            ),
+        )
+    return RoutePreferenceToolResult(
+        target=target,
+        action=action,
+        **service.list_routines(workspace_id=workspace_id, limit=limit),
     )
 
 

@@ -1891,6 +1891,62 @@ class DailyRouteService:
             "routine_id": routine_id,
             "summary": f"'{routine_name}' 루틴을 저장했습니다.",
             "how_it_will_be_used": "일일 브리핑과 경유지 추천에서 선호 출발지, 목적지, 여유 시간을 반영합니다.",
+            "routine": {
+                "id": routine_id,
+                "workspace_id": workspace_id or DEFAULT_WORKSPACE_ID,
+                "routine_name": _normalize_spaces(routine_name),
+                "routine_type": routine_type,
+                "rule_text": _normalize_spaces(rule_text),
+                "active_days": active_days,
+                "origin": _normalize_spaces(origin),
+                "destination": _normalize_spaces(destination),
+                "preferred_buffer_minutes": preferred_buffer_minutes,
+                "avoid_conditions": avoid_conditions,
+                "created_at": now,
+                "updated_at": now,
+            },
+        }
+
+    def list_routines(self, workspace_id: str, limit: int) -> dict[str, Any]:
+        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        rows = self._fetch_all(
+            """
+            SELECT * FROM routines
+            WHERE workspace_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (normalized_workspace, limit),
+        )
+        routines = []
+        for row in rows:
+            try:
+                active_days = json.loads(row.get("active_days_json") or "[]")
+            except json.JSONDecodeError:
+                active_days = []
+            try:
+                avoid_conditions = json.loads(row.get("avoid_conditions_json") or "[]")
+            except json.JSONDecodeError:
+                avoid_conditions = []
+            routines.append(
+                {
+                    "id": row["id"],
+                    "workspace_id": row["workspace_id"],
+                    "routine_name": row["routine_name"],
+                    "routine_type": row["routine_type"],
+                    "rule_text": row["rule_text"],
+                    "active_days": active_days,
+                    "origin": row["origin"],
+                    "destination": row["destination"],
+                    "preferred_buffer_minutes": row["preferred_buffer_minutes"],
+                    "avoid_conditions": avoid_conditions,
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return {
+            "routines": routines,
+            "summary": f"생활 루틴 {len(routines)}건을 조회했습니다.",
         }
 
     def build_daily_route_briefing(
