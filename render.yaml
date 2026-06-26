@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: talkguard-mcp
+    runtime: docker
+    healthCheckPath: /health
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: TALKGUARD_DB_PATH
+        value: /data/talkguard.db
