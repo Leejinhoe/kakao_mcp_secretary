@@ -61,6 +61,8 @@ class SaveCommitmentResult(BaseModel):
     commitment_id: str
     summary: str
     warning: str | None = None
+    conflict_detected: bool = False
+    conflict_candidates: list[dict] = []
 
 
 class SaveRoomContextResult(BaseModel):

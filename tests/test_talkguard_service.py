@@ -204,6 +204,115 @@ def test_save_commitment_warns_when_deadline_is_not_parseable(tmp_path: Path) ->
     assert "날짜 표현을 해석하지 못했습니다" in result["warning"]
 
 
+def test_save_commitment_warns_when_same_schedule_already_exists(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+
+    first = service.save_commitment(
+        workspace_id="default",
+        title="거래처 미팅",
+        commitment_type="meeting",
+        deadline_text="내일",
+        time_text="오후 3시",
+        related_person="거래처",
+        related_room="거래처방",
+        source_type="manual",
+        importance="high",
+        status="planned",
+        memo="",
+    )
+    second = service.save_commitment(
+        workspace_id="default",
+        title="00기업 미팅",
+        commitment_type="meeting",
+        deadline_text="내일",
+        time_text="오후 3시",
+        related_person="00기업",
+        related_room="거래처방",
+        source_type="manual",
+        importance="high",
+        status="planned",
+        memo="",
+    )
+
+    assert first["conflict_detected"] is False
+    assert second["saved"] is True
+    assert second["conflict_detected"] is True
+    assert second["conflict_candidates"][0]["title"] == "거래처 미팅"
+    assert second["conflict_candidates"][0]["commitment_id"] == first["commitment_id"]
+    assert (
+        "이미 내일 오후 3시에 '거래처 미팅' 일정이 저장되어 있습니다. "
+        "같은 시간에 새 일정을 추가해도 되는지 확인하세요."
+    ) in second["warning"]
+
+
+def test_save_commitment_same_schedule_conflict_matches_equivalent_time_format(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+
+    service.save_commitment(
+        workspace_id="default",
+        title="거래처 미팅",
+        commitment_type="meeting",
+        deadline_text="2026-07-01",
+        time_text="오후 3시",
+        related_person="거래처",
+        related_room="거래처방",
+        source_type="manual",
+        importance="high",
+        status="planned",
+        memo="",
+    )
+    result = service.save_commitment(
+        workspace_id="default",
+        title="00기업 미팅",
+        commitment_type="meeting",
+        deadline_text="7월 1일",
+        time_text="15:00",
+        related_person="00기업",
+        related_room="거래처방",
+        source_type="manual",
+        importance="high",
+        status="planned",
+        memo="",
+    )
+
+    assert result["conflict_detected"] is True
+    assert result["conflict_candidates"][0]["title"] == "거래처 미팅"
+
+
+def test_save_commitment_ignores_done_same_schedule(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+
+    service.save_commitment(
+        workspace_id="default",
+        title="끝난 미팅",
+        commitment_type="meeting",
+        deadline_text="내일",
+        time_text="오후 3시",
+        related_person="",
+        related_room="",
+        source_type="manual",
+        importance="medium",
+        status="done",
+        memo="",
+    )
+    result = service.save_commitment(
+        workspace_id="default",
+        title="새 미팅",
+        commitment_type="meeting",
+        deadline_text="내일",
+        time_text="오후 3시",
+        related_person="",
+        related_room="",
+        source_type="manual",
+        importance="medium",
+        status="planned",
+        memo="",
+    )
+
+    assert result["conflict_detected"] is False
+    assert result["conflict_candidates"] == []
+
+
 def test_explain_conversation_context_plainifies_pangyo_jargon(tmp_path: Path) -> None:
     service = build_service(tmp_path)
 

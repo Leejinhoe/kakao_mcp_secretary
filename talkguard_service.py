@@ -888,6 +888,70 @@ def _build_commitment_warning(
     return " ".join(warning for warning in warnings if warning) or None
 
 
+def _commitment_has_same_schedule(
+    commitment: dict[str, Any],
+    deadline_text: str,
+    time_text: str,
+) -> bool:
+    if commitment.get("status") not in ACTIVE_COMMITMENT_STATUSES:
+        return False
+    if not commitment.get("deadline_text") or not commitment.get("time_text"):
+        return False
+    saved_date_keys = _date_keys(commitment.get("deadline_text", ""))
+    new_date_keys = _date_keys(deadline_text)
+    saved_time_keys = _time_keys(commitment.get("time_text", ""))
+    new_time_keys = _time_keys(time_text)
+    return bool(saved_date_keys & new_date_keys) and bool(saved_time_keys & new_time_keys)
+
+
+def _build_same_schedule_conflict_candidates(
+    commitments: list[dict[str, Any]],
+    deadline_text: str,
+    time_text: str,
+) -> list[dict[str, Any]]:
+    if not _normalize_spaces(deadline_text) or not _normalize_spaces(time_text):
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    for commitment in commitments:
+        if not _commitment_has_same_schedule(commitment, deadline_text, time_text):
+            continue
+        candidates.append(
+            {
+                "commitment_id": commitment.get("id", ""),
+                "title": commitment.get("title", ""),
+                "commitment_type": commitment.get("commitment_type", ""),
+                "deadline_text": commitment.get("deadline_text", ""),
+                "time_text": commitment.get("time_text", ""),
+                "related_person": commitment.get("related_person", ""),
+                "related_room": commitment.get("related_room", ""),
+                "source_type": commitment.get("source_type", ""),
+                "importance": commitment.get("importance", ""),
+                "status": commitment.get("status", ""),
+            }
+        )
+    return candidates
+
+
+def _warning_for_same_schedule_conflict(
+    deadline_text: str,
+    time_text: str,
+    conflict_candidates: list[dict[str, Any]],
+) -> str | None:
+    if not conflict_candidates:
+        return None
+    first_candidate = conflict_candidates[0]
+    return (
+        f"이미 {deadline_text} {time_text}에 '{first_candidate['title']}' 일정이 저장되어 있습니다. "
+        "같은 시간에 새 일정을 추가해도 되는지 확인하세요."
+    )
+
+
+def _join_warnings(*warnings: str | None) -> str | None:
+    joined = " ".join(warning for warning in warnings if warning)
+    return joined or None
+
+
 def _split_schedule_candidate_sentences(text: str) -> list[str]:
     sentences: list[str] = []
     for sentence in _split_context_sentences(text):
@@ -1379,6 +1443,21 @@ class TalkGuardService:
         status: CommitmentStatus,
         memo: str,
     ) -> dict[str, Any]:
+        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        existing_commitments = self._fetch_all(
+            """
+            SELECT * FROM commitments
+            WHERE workspace_id = ? AND status IN (?, ?, ?)
+            ORDER BY created_at DESC
+            """,
+            (normalized_workspace, *sorted(ACTIVE_COMMITMENT_STATUSES)),
+        )
+        conflict_candidates = _build_same_schedule_conflict_candidates(
+            commitments=existing_commitments,
+            deadline_text=deadline_text,
+            time_text=time_text,
+        )
+
         commitment_id = f"commit_{uuid4().hex[:10]}"
         now = _now_iso()
         with self._connect() as connection:
@@ -1392,7 +1471,7 @@ class TalkGuardService:
                 """,
                 (
                     commitment_id,
-                    workspace_id or DEFAULT_WORKSPACE_ID,
+                    normalized_workspace,
                     _normalize_spaces(title),
                     commitment_type,
                     _normalize_spaces(deadline_text),
@@ -1419,12 +1498,17 @@ class TalkGuardService:
             summary_parts.append(f"마감: {deadline_text}")
         if time_text:
             summary_parts.append(f"시간: {time_text}")
-        warning = _build_commitment_warning(commitment_type, deadline_text, time_text)
+        warning = _join_warnings(
+            _warning_for_same_schedule_conflict(deadline_text, time_text, conflict_candidates),
+            _build_commitment_warning(commitment_type, deadline_text, time_text),
+        )
         return {
             "saved": True,
             "commitment_id": commitment_id,
             "summary": " / ".join(summary_parts),
             "warning": warning,
+            "conflict_detected": bool(conflict_candidates),
+            "conflict_candidates": conflict_candidates,
         }
 
     def save_room_context(
