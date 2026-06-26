@@ -10,3 +10,15 @@ services:
         value: /data/dailyroute_guard.db
       - key: ENABLE_REAL_KAKAO_APIS
         value: "false"
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: KAKAO_REST_API_KEY
+        sync: false
+      - key: KAKAO_CLIENT_SECRET
+        sync: false
+      - key: KAKAO_REDIRECT_URI
+        sync: false
+      - key: KAKAO_OAUTH_SCOPES
+        value: talk_message
+      - key: KAKAO_CALENDAR_ID
+        value: primary

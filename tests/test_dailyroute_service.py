@@ -140,7 +140,7 @@ def test_save_schedule_can_allow_conflict(tmp_path: Path) -> None:
 
     assert result["saved"] is True
     assert result["conflict_detected"] is True
-    assert result["talk_calendar_payload"]["title"] == "거래처 미팅"
+    assert result["talk_calendar_payload"]["event"]["title"] == "거래처 미팅"
 
 
 def test_check_day_feasibility_warns_for_impossible_route(tmp_path: Path) -> None:
@@ -264,3 +264,41 @@ def test_route_watch_creates_due_alert(tmp_path: Path) -> None:
     assert watch["created"] is True
     assert alerts["alerts"]
     assert alerts["alerts"][0]["risk_level"] == "high"
+
+
+def test_kakao_oauth_login_url_uses_env_key_and_stores_state(tmp_path: Path, monkeypatch) -> None:
+    service = build_service(tmp_path)
+    monkeypatch.setenv("KAKAO_REST_API_KEY", "rest_key_for_test")
+    monkeypatch.setenv("KAKAO_OAUTH_SCOPES", "talk_message")
+
+    result = service.build_kakao_oauth_login_url(
+        workspace_id="test",
+        redirect_uri="http://127.0.0.1:8000/oauth/kakao/callback",
+    )
+
+    assert result["configured"] is True
+    assert "kauth.kakao.com/oauth/authorize" in result["login_url"]
+    assert "client_id=rest_key_for_test" in result["login_url"]
+    assert "scope=talk_message" in result["login_url"]
+    assert service._fetch_one("SELECT * FROM oauth_states WHERE state = ?", (result["state"],)) is not None
+
+
+def test_kakao_token_storage_can_feed_api_callers(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+
+    stored = service._save_kakao_token(
+        "test",
+        {
+            "access_token": "access_for_test",
+            "refresh_token": "refresh_for_test",
+            "expires_in": 3600,
+            "refresh_token_expires_in": 7200,
+            "scope": "talk_message",
+        },
+    )
+    token = service.get_kakao_access_token("test")
+
+    assert stored["stored"] is True
+    assert token["available"] is True
+    assert token["access_token"] == "access_for_test"
+    assert service.kakao_auth_status("test")["authenticated"] is True

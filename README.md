@@ -104,6 +104,7 @@ Inspector 설정:
 - PAT는 HTTPS 비공개 저장소를 클론할 때만 필요합니다.
 - 서버는 `HOST=0.0.0.0`, `PORT` 환경변수를 사용합니다.
 - Streamable HTTP path는 `/mcp`입니다.
+- 카카오 OAuth를 쓸 경우 배포 도메인을 `PUBLIC_BASE_URL`에 넣고, 카카오 Developers의 Redirect URI에 `https://배포도메인/oauth/kakao/callback`을 등록하세요.
 - 기존에 제한 단어가 들어간 서버 카드로 등록했다면 삭제 후 새 이름으로 다시 등록하는 편이 안전합니다.
 
 ## 8. 카카오 API 연동 환경변수
@@ -111,16 +112,34 @@ Inspector 설정:
 키가 없어도 서버는 동작하며 mock/fallback 결과를 한국어로 표시합니다.
 
 ```bash
-ENABLE_REAL_KAKAO_APIS=false
+ENABLE_REAL_KAKAO_APIS=true
 KAKAO_REST_API_KEY=
 KAKAO_MOBILITY_API_KEY=
 KAKAO_ACCESS_TOKEN=
+KAKAO_CLIENT_SECRET=
+KAKAO_REDIRECT_URI=http://127.0.0.1:8000/oauth/kakao/callback
+KAKAO_OAUTH_SCOPES=talk_message
+KAKAO_CALENDAR_ID=primary
+PUBLIC_BASE_URL=http://127.0.0.1:8000
 DAILYROUTE_DB_PATH=data/dailyroute_guard.db
 ```
 
 - 키 없이 동작: 일정 추출, 일정 저장, 중복 경고, SQLite 저장, 모의 이동시간, 모의 경유지 추천, 경로 감시 로그
-- 실제 API 키 필요: 실제 장소 검색, 실제 이동시간 조회, 톡캘린더 생성, 나에게 보내기 알림
+- `KAKAO_REST_API_KEY`가 있으면 카카오 OAuth 로그인 URL을 만들 수 있고, 카카오 Local 장소 검색을 실제 API로 시도합니다.
+- `KAKAO_REDIRECT_URI`는 카카오 Developers에 등록한 Redirect URI와 정확히 같아야 합니다.
+- `KAKAO_CLIENT_SECRET`이 켜져 있는 앱이면 token 발급 때 필요합니다.
+- `KAKAO_OAUTH_SCOPES` 기본값은 `talk_message`입니다. 톡캘린더 권한을 추가 동의로 요청해야 하는 앱이면 카카오 Developers에서 확인한 scope ID를 함께 넣으세요.
+- OAuth 로그인 후 저장된 access token으로 `save_schedule(save_to_talk_calendar=true)`는 톡캘린더 생성 API를, `build_daily_route_briefing(send_to_me=true)`와 route watch 알림은 나에게 보내기 API를 시도합니다.
+- 실제 이동시간 조회는 별도의 `KAKAO_MOBILITY_API_KEY` 연동 영역입니다. 키가 없거나 아직 Mobility 호출을 켜지 않으면 모의 이동시간을 사용합니다.
 - MVP에서는 이미지 OCR을 서버 안에서 직접 수행하지 않습니다. 이미지에서 OCR된 텍스트를 `extract_schedule_from_text`의 `text`에 넣어 테스트하세요.
+
+### 카카오 로그인 흐름
+
+1. GPT/PlayMCP에서 `health_check`를 호출하면 `kakao_login_url`이 함께 반환됩니다.
+2. 사용자가 브라우저에서 `kakao_login_url`을 열면 `/oauth/kakao/login`이 카카오 로그인 페이지로 redirect합니다.
+3. 사용자가 로그인/동의하면 카카오가 `/oauth/kakao/callback`으로 authorization code를 보냅니다.
+4. 서버가 code를 access token/refresh token으로 교환하고 SQLite에 저장합니다.
+5. 이후 같은 `workspace_id`에서 톡캘린더 생성과 나에게 보내기를 실제 API로 시도합니다.
 
 ## 9. 데모 시나리오 5개
 

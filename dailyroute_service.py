@@ -4,6 +4,9 @@ import json
 import os
 import re
 import sqlite3
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -13,6 +16,12 @@ from uuid import uuid4
 DEFAULT_WORKSPACE_ID = "default"
 DB_PATH_ENV = "DAILYROUTE_DB_PATH"
 KST = timezone(timedelta(hours=9))
+KAKAO_OAUTH_AUTHORIZE_URL = "https://kauth.kakao.com/oauth/authorize"
+KAKAO_OAUTH_TOKEN_URL = "https://kauth.kakao.com/oauth/token"
+KAKAO_CALENDAR_CREATE_EVENT_URL = "https://kapi.kakao.com/v2/api/calendar/create/event"
+KAKAO_TALK_MEMO_SEND_URL = "https://kapi.kakao.com/v2/api/talk/memo/default/send"
+KAKAO_LOCAL_KEYWORD_URL = "https://dapi.kakao.com/v2/local/search/keyword.json"
+KAKAO_LOCAL_ADDRESS_URL = "https://dapi.kakao.com/v2/local/search/address.json"
 
 ScheduleType = Literal["meeting", "deadline", "appointment", "personal", "routine", "errand", "other"]
 ScheduleSourceType = Literal["text", "ocr_text", "manual", "calendar", "other"]
@@ -23,6 +32,10 @@ NotifyChannel = Literal["kakao_me", "log_only"]
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _now_utc() -> datetime:
+    return datetime.now(UTC)
 
 
 def _normalize_spaces(text: str) -> str:
@@ -157,6 +170,15 @@ def _parse_iso_datetime(value: str) -> datetime | None:
         return None
 
 
+def _to_utc_z(value: str) -> str:
+    parsed = _parse_iso_datetime(value)
+    if not parsed:
+        return ""
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=KST)
+    return parsed.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _infer_end_at(start_at: str, schedule_type: ScheduleType) -> str:
     start = _parse_iso_datetime(start_at)
     if not start:
@@ -267,58 +289,211 @@ def _mock_mode() -> bool:
     return not _env_enabled("ENABLE_REAL_KAKAO_APIS")
 
 
-def build_talk_calendar_event_payload(schedule: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "title": schedule.get("title", ""),
-        "time": {
-            "start_at": schedule.get("start_at", ""),
-            "end_at": schedule.get("end_at", ""),
-            "timezone": "Asia/Seoul",
+def _public_base_url() -> str:
+    return os.getenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+
+
+def _kakao_login_url_for_workspace(workspace_id: str) -> str:
+    query = urllib.parse.urlencode({"workspace_id": workspace_id or DEFAULT_WORKSPACE_ID})
+    return f"{_public_base_url()}/oauth/kakao/login?{query}"
+
+
+def _form_post_json(url: str, data: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:
+    encoded = urllib.parse.urlencode(data).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=encoded,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
+            **(headers or {}),
         },
-        "location": schedule.get("location_text", ""),
-        "reminders": [{"minutes": schedule.get("reminder_minutes", 60)}],
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            raw = response.read().decode("utf-8")
+            return {"ok": True, "status": response.status, "json": json.loads(raw) if raw else {}}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed_body: Any = json.loads(body)
+        except json.JSONDecodeError:
+            parsed_body = body
+        return {"ok": False, "status": exc.code, "error": parsed_body}
+    except Exception as exc:
+        return {"ok": False, "status": 0, "error": str(exc)}
+
+
+def _get_json(url: str, params: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:
+    query = urllib.parse.urlencode(params)
+    request = urllib.request.Request(
+        f"{url}?{query}" if query else url,
+        headers=headers or {},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            raw = response.read().decode("utf-8")
+            return {"ok": True, "status": response.status, "json": json.loads(raw) if raw else {}}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed_body: Any = json.loads(body)
+        except json.JSONDecodeError:
+            parsed_body = body
+        return {"ok": False, "status": exc.code, "error": parsed_body}
+    except Exception as exc:
+        return {"ok": False, "status": 0, "error": str(exc)}
+
+
+def build_talk_calendar_event_payload(schedule: dict[str, Any]) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "title": schedule.get("title", "")[:50] or "제목 미정 일정",
+        "time": {
+            "start_at": _to_utc_z(schedule.get("start_at", "")),
+            "end_at": _to_utc_z(schedule.get("end_at", "")),
+            "time_zone": "Asia/Seoul",
+            "all_day": False,
+            "lunar": False,
+        },
+        "description": "DailyRoute Guard에서 생성한 일정입니다.",
+        "reminders": [schedule.get("reminder_minutes", 60)],
+    }
+    if schedule.get("location_text"):
+        event["location"] = {"name": schedule.get("location_text", "")}
+    return {
+        "calendar_id": os.getenv("KAKAO_CALENDAR_ID", "primary"),
+        "event": event,
     }
 
 
-def create_talk_calendar_event_if_configured(payload: dict[str, Any]) -> dict[str, Any]:
-    if _mock_mode() or not os.getenv("KAKAO_ACCESS_TOKEN"):
+def create_talk_calendar_event_if_configured(
+    payload: dict[str, Any],
+    access_token: str = "",
+    auth_url: str = "",
+) -> dict[str, Any]:
+    if _mock_mode():
         return {
             "created": False,
             "payload": payload,
-            "message": "톡캘린더 연동 토큰이 없어 로컬 DB에만 저장했습니다.",
+            "auth_required": False,
+            "auth_url": auth_url,
+            "message": "ENABLE_REAL_KAKAO_APIS가 true가 아니어서 로컬 DB에만 저장했습니다.",
+        }
+    token = access_token or os.getenv("KAKAO_ACCESS_TOKEN", "")
+    if not token:
+        return {
+            "created": False,
+            "payload": payload,
+            "auth_required": True,
+            "auth_url": auth_url,
+            "message": "카카오 로그인이 필요합니다. auth_url에서 동의하면 다음부터 톡캘린더 생성을 시도합니다.",
+        }
+    result = _form_post_json(
+        KAKAO_CALENDAR_CREATE_EVENT_URL,
+        {
+            "calendar_id": payload.get("calendar_id", "primary"),
+            "event": json.dumps(payload.get("event", {}), ensure_ascii=False),
+        },
+        {"Authorization": f"Bearer {token}"},
+    )
+    if result["ok"]:
+        return {
+            "created": True,
+            "event_id": result["json"].get("event_id", ""),
+            "payload": payload,
+            "auth_required": False,
+            "auth_url": "",
+            "message": "톡캘린더에 일정을 생성했습니다.",
         }
     return {
         "created": False,
         "payload": payload,
-        "message": "실제 톡캘린더 생성 호출은 어댑터 자리만 준비되어 있습니다.",
+        "auth_required": result.get("status") in {401, 403},
+        "auth_url": auth_url,
+        "message": "톡캘린더 생성 API 호출에 실패했습니다.",
+        "error": result.get("error"),
     }
 
 
-def list_talk_calendar_events_if_configured(start_at: str = "", end_at: str = "") -> dict[str, Any]:
-    if _mock_mode() or not os.getenv("KAKAO_ACCESS_TOKEN"):
+def list_talk_calendar_events_if_configured(
+    start_at: str = "",
+    end_at: str = "",
+    access_token: str = "",
+) -> dict[str, Any]:
+    token = access_token or os.getenv("KAKAO_ACCESS_TOKEN", "")
+    if _mock_mode() or not token:
         return {
             "events": [],
             "message": "톡캘린더 조회 토큰이 없어 로컬 DB 일정만 사용합니다.",
             "requested_range": {"start_at": start_at, "end_at": end_at},
         }
+    result = _get_json(
+        "https://kapi.kakao.com/v2/api/calendar/events",
+        {"calendar_id": os.getenv("KAKAO_CALENDAR_ID", "primary"), "from": start_at, "to": end_at},
+        {"Authorization": f"Bearer {token}"},
+    )
+    if result["ok"]:
+        return {
+            "events": result["json"].get("events", []),
+            "message": "톡캘린더 일정을 조회했습니다.",
+            "requested_range": {"start_at": start_at, "end_at": end_at},
+        }
     return {
         "events": [],
-        "message": "실제 톡캘린더 조회 호출은 어댑터 자리만 준비되어 있습니다.",
+        "message": "톡캘린더 일정 조회 API 호출에 실패했습니다.",
         "requested_range": {"start_at": start_at, "end_at": end_at},
+        "error": result.get("error"),
     }
 
 
-def send_message_to_me_if_configured(message_text: str) -> dict[str, Any]:
-    if _mock_mode() or not os.getenv("KAKAO_ACCESS_TOKEN"):
+def send_message_to_me_if_configured(message_text: str, access_token: str = "", auth_url: str = "") -> dict[str, Any]:
+    template_object = {
+        "object_type": "text",
+        "text": message_text[:200],
+        "link": {
+            "web_url": _public_base_url(),
+            "mobile_web_url": _public_base_url(),
+        },
+        "button_title": "DailyRoute 보기",
+    }
+    if _mock_mode():
         return {
             "sent": False,
-            "message_payload": {"text": message_text},
-            "warning": "나에게 보내기 토큰이 없어 메시지 본문만 반환했습니다.",
+            "message_payload": {"template_object": template_object},
+            "auth_required": False,
+            "auth_url": auth_url,
+            "warning": "ENABLE_REAL_KAKAO_APIS가 true가 아니어서 메시지 본문만 반환했습니다.",
+        }
+    token = access_token or os.getenv("KAKAO_ACCESS_TOKEN", "")
+    if not token:
+        return {
+            "sent": False,
+            "message_payload": {"template_object": template_object},
+            "auth_required": True,
+            "auth_url": auth_url,
+            "warning": "카카오 로그인이 필요합니다. auth_url에서 동의하면 나에게 보내기를 시도할 수 있습니다.",
+        }
+    result = _form_post_json(
+        KAKAO_TALK_MEMO_SEND_URL,
+        {"template_object": json.dumps(template_object, ensure_ascii=False)},
+        {"Authorization": f"Bearer {token}"},
+    )
+    if result["ok"] and result["json"].get("result_code") == 0:
+        return {
+            "sent": True,
+            "message_payload": {"template_object": template_object},
+            "auth_required": False,
+            "auth_url": "",
+            "warning": None,
         }
     return {
         "sent": False,
-        "message_payload": {"text": message_text},
-        "warning": "실제 메시지 전송 호출은 어댑터 자리만 준비되어 있습니다.",
+        "message_payload": {"template_object": template_object},
+        "auth_required": result.get("status") in {401, 403},
+        "auth_url": auth_url,
+        "warning": "나에게 보내기 API 호출에 실패했습니다.",
+        "error": result.get("error"),
     }
 
 
@@ -384,12 +559,34 @@ def search_place_keyword(keyword: str, area: str = "") -> list[dict[str, Any]]:
                 "mock": True,
             }
         ]
+    result = _get_json(
+        KAKAO_LOCAL_KEYWORD_URL,
+        {"query": f"{search_area} {keyword}", "size": 5},
+        {"Authorization": f"KakaoAK {os.getenv('KAKAO_REST_API_KEY')}"},
+    )
+    if result["ok"]:
+        places = []
+        for document in result["json"].get("documents", []):
+            places.append(
+                {
+                    "name": document.get("place_name", ""),
+                    "keyword": keyword,
+                    "address": document.get("road_address_name") or document.get("address_name", ""),
+                    "place_url": document.get("place_url", ""),
+                    "x": document.get("x", ""),
+                    "y": document.get("y", ""),
+                    "mock": False,
+                }
+            )
+        if places:
+            return places
     return [
         {
             "name": f"{search_area} {keyword} 검색 후보",
             "keyword": keyword,
             "address": f"{search_area} 인근",
             "mock": False,
+            "warning": result.get("error") if "result" in locals() else None,
         }
     ]
 
@@ -405,13 +602,28 @@ def resolve_address_or_place_to_coordinates(place_text: str) -> dict[str, Any]:
             "mock": True,
             "warning": "장소 API 키가 없어 모의 좌표를 반환했습니다.",
         }
+    result = _get_json(
+        KAKAO_LOCAL_ADDRESS_URL,
+        {"query": place_text, "size": 1},
+        {"Authorization": f"KakaoAK {os.getenv('KAKAO_REST_API_KEY')}"},
+    )
+    if result["ok"] and result["json"].get("documents"):
+        document = result["json"]["documents"][0]
+        return {
+            "place_text": place_text,
+            "lat": float(document.get("y") or 0),
+            "lng": float(document.get("x") or 0),
+            "area_token": _area_token(document.get("address_name", place_text)),
+            "mock": False,
+            "warning": None,
+        }
     return {
         "place_text": place_text,
         "lat": 37.5,
         "lng": 127.0,
         "area_token": _area_token(place_text),
         "mock": False,
-        "warning": "실제 장소 좌표 조회 호출은 어댑터 자리만 준비되어 있습니다.",
+        "warning": "장소 좌표 조회 API 호출에 실패해 기본 좌표를 반환했습니다.",
     }
 
 
@@ -433,14 +645,17 @@ def search_places_by_category_or_keyword(
                 "mock": True,
             }
         ]
+    candidates = search_place_keyword(label, area)
     return [
         {
-            "name": f"{area} {label} 후보",
+            "name": candidate.get("name", ""),
             "category": category,
-            "address": f"{area} 인근",
+            "address": candidate.get("address", ""),
+            "place_url": candidate.get("place_url", ""),
             "estimated_detour_minutes": 10,
-            "mock": False,
+            "mock": candidate.get("mock", False),
         }
+        for candidate in candidates[:3]
     ]
 
 
@@ -537,11 +752,36 @@ class DailyRouteService:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS oauth_states (
+                    state TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    redirect_uri TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS oauth_tokens (
+                    workspace_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    access_token TEXT NOT NULL,
+                    refresh_token TEXT NOT NULL DEFAULT '',
+                    token_type TEXT NOT NULL DEFAULT 'bearer',
+                    scope TEXT NOT NULL DEFAULT '',
+                    expires_at TEXT NOT NULL DEFAULT '',
+                    refresh_token_expires_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (workspace_id, provider)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_schedules_workspace_start
                 ON schedules (workspace_id, start_at);
 
                 CREATE INDEX IF NOT EXISTS idx_route_watch_workspace
                 ON route_watch_jobs (workspace_id, next_check_time);
+
+                CREATE INDEX IF NOT EXISTS idx_oauth_states_created
+                ON oauth_states (provider, created_at);
                 """
             )
             connection.commit()
@@ -555,6 +795,232 @@ class DailyRouteService:
         with self._connect() as connection:
             row = connection.execute(query, params).fetchone()
         return dict(row) if row else None
+
+    def _save_kakao_token(self, workspace_id: str, token_response: dict[str, Any]) -> dict[str, Any]:
+        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        now = _now_utc()
+        expires_in = int(token_response.get("expires_in") or 0)
+        refresh_expires_in = int(token_response.get("refresh_token_expires_in") or 0)
+        expires_at = (now + timedelta(seconds=expires_in)).isoformat(timespec="seconds") if expires_in else ""
+        refresh_expires_at = (
+            now + timedelta(seconds=refresh_expires_in)
+        ).isoformat(timespec="seconds") if refresh_expires_in else ""
+        previous = self._fetch_one(
+            "SELECT * FROM oauth_tokens WHERE workspace_id = ? AND provider = 'kakao'",
+            (normalized_workspace,),
+        )
+        refresh_token = token_response.get("refresh_token") or (previous or {}).get("refresh_token", "")
+        refresh_token_expires_at = refresh_expires_at or (previous or {}).get("refresh_token_expires_at", "")
+        created_at = (previous or {}).get("created_at", now.isoformat(timespec="seconds"))
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO oauth_tokens (
+                    workspace_id, provider, access_token, refresh_token, token_type,
+                    scope, expires_at, refresh_token_expires_at, created_at, updated_at
+                ) VALUES (?, 'kakao', ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(workspace_id, provider) DO UPDATE SET
+                    access_token = excluded.access_token,
+                    refresh_token = excluded.refresh_token,
+                    token_type = excluded.token_type,
+                    scope = excluded.scope,
+                    expires_at = excluded.expires_at,
+                    refresh_token_expires_at = excluded.refresh_token_expires_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    normalized_workspace,
+                    token_response.get("access_token", ""),
+                    refresh_token,
+                    token_response.get("token_type", "bearer"),
+                    token_response.get("scope", ""),
+                    expires_at,
+                    refresh_token_expires_at,
+                    created_at,
+                    now.isoformat(timespec="seconds"),
+                ),
+            )
+            connection.commit()
+        return {
+            "stored": True,
+            "workspace_id": normalized_workspace,
+            "expires_at": expires_at,
+            "refresh_token_expires_at": refresh_token_expires_at,
+            "scope": token_response.get("scope", ""),
+        }
+
+    def build_kakao_oauth_login_url(self, workspace_id: str, redirect_uri: str) -> dict[str, Any]:
+        rest_key = os.getenv("KAKAO_REST_API_KEY", "")
+        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        if not rest_key:
+            return {
+                "configured": False,
+                "login_url": "",
+                "warning": "KAKAO_REST_API_KEY 환경변수가 없어 카카오 로그인 URL을 만들 수 없습니다.",
+            }
+        if not redirect_uri:
+            return {
+                "configured": False,
+                "login_url": "",
+                "warning": "KAKAO_REDIRECT_URI 또는 PUBLIC_BASE_URL 설정이 필요합니다.",
+            }
+        state = f"state_{uuid4().hex}"
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO oauth_states (state, workspace_id, provider, redirect_uri, created_at)
+                VALUES (?, ?, 'kakao', ?, ?)
+                """,
+                (state, normalized_workspace, redirect_uri, _now_iso()),
+            )
+            connection.commit()
+        params = {
+            "response_type": "code",
+            "client_id": rest_key,
+            "redirect_uri": redirect_uri,
+            "state": state,
+        }
+        scopes = _normalize_spaces(os.getenv("KAKAO_OAUTH_SCOPES", "talk_message"))
+        if scopes:
+            params["scope"] = scopes
+        return {
+            "configured": True,
+            "login_url": f"{KAKAO_OAUTH_AUTHORIZE_URL}?{urllib.parse.urlencode(params)}",
+            "state": state,
+            "workspace_id": normalized_workspace,
+            "redirect_uri": redirect_uri,
+            "scope": scopes,
+            "warning": None,
+        }
+
+    def complete_kakao_oauth(self, code: str, state: str, redirect_uri: str) -> dict[str, Any]:
+        if not code:
+            return {"success": False, "summary": "authorization code가 없습니다.", "warning": "카카오 로그인 callback 값을 확인하세요."}
+        saved_state = self._fetch_one(
+            "SELECT * FROM oauth_states WHERE state = ? AND provider = 'kakao'",
+            (state,),
+        )
+        if not saved_state:
+            return {"success": False, "summary": "OAuth state를 찾지 못했습니다.", "warning": "로그인 URL을 다시 발급해 주세요."}
+        with self._connect() as connection:
+            connection.execute("DELETE FROM oauth_states WHERE state = ?", (state,))
+            connection.commit()
+
+        rest_key = os.getenv("KAKAO_REST_API_KEY", "")
+        if not rest_key:
+            return {"success": False, "summary": "KAKAO_REST_API_KEY가 없습니다.", "warning": "환경변수를 먼저 설정하세요."}
+        token_request = {
+            "grant_type": "authorization_code",
+            "client_id": rest_key,
+            "redirect_uri": redirect_uri or saved_state["redirect_uri"],
+            "code": code,
+        }
+        client_secret = os.getenv("KAKAO_CLIENT_SECRET", "")
+        if client_secret:
+            token_request["client_secret"] = client_secret
+        token_result = _form_post_json(KAKAO_OAUTH_TOKEN_URL, token_request)
+        if not token_result["ok"]:
+            return {
+                "success": False,
+                "summary": "카카오 token 발급에 실패했습니다.",
+                "warning": "Redirect URI, REST API key, Client Secret 설정을 확인하세요.",
+                "error": token_result.get("error"),
+            }
+        stored = self._save_kakao_token(saved_state["workspace_id"], token_result["json"])
+        return {
+            "success": True,
+            "summary": "카카오 access_token과 refresh_token을 저장했습니다.",
+            "workspace_id": saved_state["workspace_id"],
+            "scope": stored.get("scope", ""),
+            "expires_at": stored.get("expires_at", ""),
+            "refresh_token_expires_at": stored.get("refresh_token_expires_at", ""),
+        }
+
+    def kakao_auth_status(self, workspace_id: str) -> dict[str, Any]:
+        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        if os.getenv("KAKAO_ACCESS_TOKEN"):
+            return {
+                "authenticated": True,
+                "source": "env",
+                "workspace_id": normalized_workspace,
+                "expires_at": "",
+                "scope": "",
+                "login_url": "",
+            }
+        token = self._fetch_one(
+            "SELECT * FROM oauth_tokens WHERE workspace_id = ? AND provider = 'kakao'",
+            (normalized_workspace,),
+        )
+        return {
+            "authenticated": token is not None,
+            "source": "db" if token else "none",
+            "workspace_id": normalized_workspace,
+            "expires_at": token.get("expires_at", "") if token else "",
+            "scope": token.get("scope", "") if token else "",
+            "login_url": "" if token else _kakao_login_url_for_workspace(normalized_workspace),
+        }
+
+    def get_kakao_access_token(self, workspace_id: str) -> dict[str, Any]:
+        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        env_token = os.getenv("KAKAO_ACCESS_TOKEN", "")
+        if env_token:
+            return {"available": True, "access_token": env_token, "source": "env", "warning": None}
+        token = self._fetch_one(
+            "SELECT * FROM oauth_tokens WHERE workspace_id = ? AND provider = 'kakao'",
+            (normalized_workspace,),
+        )
+        if not token:
+            return {
+                "available": False,
+                "access_token": "",
+                "source": "none",
+                "warning": "카카오 로그인이 필요합니다.",
+                "auth_url": _kakao_login_url_for_workspace(normalized_workspace),
+            }
+        expires_at = _parse_iso_datetime(token.get("expires_at", ""))
+        if expires_at and expires_at <= _now_utc() + timedelta(minutes=5) and token.get("refresh_token"):
+            refreshed = self._refresh_kakao_token(normalized_workspace, token["refresh_token"])
+            if refreshed.get("available"):
+                return refreshed
+        return {
+            "available": True,
+            "access_token": token.get("access_token", ""),
+            "source": "db",
+            "warning": None,
+            "auth_url": "",
+        }
+
+    def _refresh_kakao_token(self, workspace_id: str, refresh_token: str) -> dict[str, Any]:
+        rest_key = os.getenv("KAKAO_REST_API_KEY", "")
+        if not rest_key:
+            return {"available": False, "access_token": "", "source": "db", "warning": "KAKAO_REST_API_KEY가 없어 토큰 갱신을 못했습니다."}
+        refresh_request = {
+            "grant_type": "refresh_token",
+            "client_id": rest_key,
+            "refresh_token": refresh_token,
+        }
+        client_secret = os.getenv("KAKAO_CLIENT_SECRET", "")
+        if client_secret:
+            refresh_request["client_secret"] = client_secret
+        refresh_result = _form_post_json(KAKAO_OAUTH_TOKEN_URL, refresh_request)
+        if not refresh_result["ok"]:
+            return {
+                "available": False,
+                "access_token": "",
+                "source": "db",
+                "warning": "카카오 access_token 갱신에 실패했습니다. 다시 로그인해 주세요.",
+                "auth_url": _kakao_login_url_for_workspace(workspace_id),
+                "error": refresh_result.get("error"),
+            }
+        stored = self._save_kakao_token(workspace_id, refresh_result["json"])
+        return {
+            "available": True,
+            "access_token": refresh_result["json"].get("access_token", ""),
+            "source": "db_refresh",
+            "warning": None,
+            "expires_at": stored.get("expires_at", ""),
+            "auth_url": "",
+        }
 
     def extract_schedule_from_text(
         self,
@@ -726,7 +1192,16 @@ class DailyRouteService:
             "reminder_minutes": reminder_minutes,
         }
         talk_payload = build_talk_calendar_event_payload(saved_schedule) if save_to_talk_calendar else {}
-        calendar_result = create_talk_calendar_event_if_configured(talk_payload) if save_to_talk_calendar else {}
+        token_result = self.get_kakao_access_token(normalized_workspace) if save_to_talk_calendar else {}
+        calendar_result = (
+            create_talk_calendar_event_if_configured(
+                talk_payload,
+                access_token=token_result.get("access_token", ""),
+                auth_url=token_result.get("auth_url", _kakao_login_url_for_workspace(normalized_workspace)),
+            )
+            if save_to_talk_calendar
+            else {}
+        )
         warning = ""
         if conflict_detected:
             first = conflict_candidates[0]
@@ -753,6 +1228,8 @@ class DailyRouteService:
             "conflict_candidates": conflict_candidates,
             "warning": warning or None,
             "talk_calendar_payload": talk_payload,
+            "calendar_result": calendar_result,
+            "kakao_login_url": calendar_result.get("auth_url", "") if calendar_result else "",
             "next_recommended_action": "일정 장소가 있다면 check_day_feasibility로 이동 가능성을 확인하세요.",
         }
 
@@ -978,7 +1455,16 @@ class DailyRouteService:
                 errands_plan["summary"],
             ]
         )
-        send_result = send_message_to_me_if_configured(message) if send_to_me else {"sent": False}
+        token_result = self.get_kakao_access_token(workspace_id) if send_to_me else {}
+        send_result = (
+            send_message_to_me_if_configured(
+                message,
+                access_token=token_result.get("access_token", ""),
+                auth_url=token_result.get("auth_url", _kakao_login_url_for_workspace(workspace_id or DEFAULT_WORKSPACE_ID)),
+            )
+            if send_to_me
+            else {"sent": False}
+        )
         warning = send_result.get("warning")
         routine_notes = [
             f"{routine['routine_name']}: {routine['rule_text']}"
@@ -997,6 +1483,7 @@ class DailyRouteService:
             ],
             "message_to_send": message,
             "sent_to_me": bool(send_result.get("sent")),
+            "send_result": send_result,
             "warning": warning,
             "summary": "일정, 이동 가능성, 심부름 계획을 합쳐 브리핑을 만들었습니다.",
         }
@@ -1102,8 +1589,13 @@ class DailyRouteService:
                 f"{job['origin']}에서 {job['location_text']}까지 {route['duration_minutes']}분 예상입니다. "
                 f"남은 시간 {remaining}분 기준으로 {'지각 위험이 있습니다' if risk else '이동 가능해 보입니다'}."
             )
+            token_result = self.get_kakao_access_token(job["workspace_id"]) if job.get("notify_channel") == "kakao_me" and risk else {}
             notify_result = (
-                send_message_to_me_if_configured(message)
+                send_message_to_me_if_configured(
+                    message,
+                    access_token=token_result.get("access_token", ""),
+                    auth_url=token_result.get("auth_url", _kakao_login_url_for_workspace(job["workspace_id"])),
+                )
                 if job.get("notify_channel") == "kakao_me" and risk
                 else {"sent": False}
             )
