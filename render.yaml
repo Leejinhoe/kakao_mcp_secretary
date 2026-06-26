@@ -1,10 +1,12 @@
 services:
   - type: web
-    name: talkguard-mcp
+    name: dailyroute-guard
     runtime: docker
     healthCheckPath: /health
     envVars:
       - key: HOST
         value: 0.0.0.0
-      - key: TALKGUARD_DB_PATH
-        value: /data/talkguard.db
+      - key: DAILYROUTE_DB_PATH
+        value: /data/dailyroute_guard.db
+      - key: ENABLE_REAL_KAKAO_APIS
+        value: "false"
