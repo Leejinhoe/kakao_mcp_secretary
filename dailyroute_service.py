@@ -1706,6 +1706,147 @@ class DailyRouteService:
             "summary": f"{origin}에서 {destination}까지 {len(selected_places)}개 경유지를 포함한 최소 우회 경로를 추천합니다.",
         }
 
+    def save_route_profile(
+        self,
+        workspace_id: str,
+        profile_name: str,
+        origin: str,
+        destination: str,
+        preferences: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        route_profile_id = f"profile_{uuid4().hex[:10]}"
+        now = _now_iso()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO route_profiles (
+                    id, workspace_id, profile_name, origin, destination,
+                    preferences_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    route_profile_id,
+                    normalized_workspace,
+                    _normalize_spaces(profile_name),
+                    _normalize_spaces(origin),
+                    _normalize_spaces(destination),
+                    json.dumps(preferences or {}, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+            connection.commit()
+        return {
+            "saved": True,
+            "profile_id": route_profile_id,
+            "summary": f"'{profile_name}' 동선 프로필을 저장했습니다.",
+            "profile": {
+                "id": route_profile_id,
+                "workspace_id": normalized_workspace,
+                "profile_name": _normalize_spaces(profile_name),
+                "origin": _normalize_spaces(origin),
+                "destination": _normalize_spaces(destination),
+                "preferences": preferences or {},
+                "created_at": now,
+                "updated_at": now,
+            },
+        }
+
+    def list_route_profiles(self, workspace_id: str, limit: int) -> dict[str, Any]:
+        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        rows = self._fetch_all(
+            """
+            SELECT * FROM route_profiles
+            WHERE workspace_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (normalized_workspace, limit),
+        )
+        profiles = []
+        for row in rows:
+            try:
+                preferences = json.loads(row.get("preferences_json") or "{}")
+            except json.JSONDecodeError:
+                preferences = {}
+            profiles.append(
+                {
+                    "id": row["id"],
+                    "workspace_id": row["workspace_id"],
+                    "profile_name": row["profile_name"],
+                    "origin": row["origin"],
+                    "destination": row["destination"],
+                    "preferences": preferences,
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return {
+            "profiles": profiles,
+            "summary": f"동선 프로필 {len(profiles)}건을 조회했습니다.",
+        }
+
+    def save_errand(
+        self,
+        workspace_id: str,
+        errand_text: str,
+        category: str,
+        preferred_area: str,
+    ) -> dict[str, Any]:
+        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        errand_id = f"errand_{uuid4().hex[:10]}"
+        inferred_category, label = _errand_category(errand_text)
+        resolved_category = _normalize_spaces(category) or inferred_category
+        now = _now_iso()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO errands (
+                    id, workspace_id, errand_text, category, preferred_area, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    errand_id,
+                    normalized_workspace,
+                    _normalize_spaces(errand_text),
+                    resolved_category,
+                    _normalize_spaces(preferred_area),
+                    now,
+                ),
+            )
+            connection.commit()
+        return {
+            "saved": True,
+            "errand_id": errand_id,
+            "summary": f"'{errand_text}' 심부름을 저장했습니다.",
+            "errand": {
+                "id": errand_id,
+                "workspace_id": normalized_workspace,
+                "errand_text": _normalize_spaces(errand_text),
+                "category": resolved_category,
+                "category_label": label,
+                "preferred_area": _normalize_spaces(preferred_area),
+                "created_at": now,
+            },
+        }
+
+    def list_errands(self, workspace_id: str, limit: int) -> dict[str, Any]:
+        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        errands = self._fetch_all(
+            """
+            SELECT * FROM errands
+            WHERE workspace_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (normalized_workspace, limit),
+        )
+        return {
+            "errands": errands,
+            "summary": f"심부름 {len(errands)}건을 조회했습니다.",
+        }
+
     def save_routine(
         self,
         workspace_id: str,

@@ -28,10 +28,12 @@ DailyRoute Guard(생활동선 캘린더 가드)는 텍스트나 OCR 텍스트에
 3. `save_schedule`: 일정 저장 및 중복 경고
 4. `check_day_feasibility`: 하루 일정의 이동 가능성 확인
 5. `find_places_on_route`: 동선 중 심부름 경유지 추천
-6. `save_routine`: 생활 루틴 저장
-7. `build_daily_route_briefing`: 일일 동선 브리핑 생성
-8. `create_route_watch`: 일정 전 경로 감시 등록
-9. `get_route_alerts`: 최근 경로 경고 조회
+6. `manage_route_profile`: 동선 프로필 저장/조회
+7. `manage_errand`: 심부름 저장/조회
+8. `save_routine`: 생활 루틴 저장
+9. `build_daily_route_briefing`: 일일 동선 브리핑 생성
+10. `create_route_watch`: 일정 전 경로 감시 등록
+11. `get_route_alerts`: 최근 경로 경고 조회
 
 ## 5. 로컬 실행 방법
 

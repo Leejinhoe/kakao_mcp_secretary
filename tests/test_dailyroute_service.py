@@ -233,6 +233,39 @@ def test_save_routine_and_daily_briefing_include_routine(tmp_path: Path) -> None
     assert any("퇴근길 심부름" in item for item in briefing["preparation_checklist"])
 
 
+def test_route_profile_can_be_saved_and_listed(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+
+    saved = service.save_route_profile(
+        workspace_id="test",
+        profile_name="평일 출근길",
+        origin="집",
+        destination="회사",
+        preferences={"buffer_minutes": 20, "avoid": ["도보 많은 경로"]},
+    )
+    listed = service.list_route_profiles(workspace_id="test", limit=10)
+
+    assert saved["saved"] is True
+    assert listed["profiles"][0]["id"] == saved["profile_id"]
+    assert listed["profiles"][0]["preferences"]["buffer_minutes"] == 20
+
+
+def test_errand_can_be_saved_and_listed(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+
+    saved = service.save_errand(
+        workspace_id="test",
+        errand_text="약국 들르기",
+        category="",
+        preferred_area="강남",
+    )
+    listed = service.list_errands(workspace_id="test", limit=10)
+
+    assert saved["saved"] is True
+    assert saved["errand"]["category"] == "pharmacy"
+    assert listed["errands"][0]["id"] == saved["errand_id"]
+
+
 def test_route_watch_creates_due_alert(tmp_path: Path) -> None:
     service = build_service(tmp_path)
     start = datetime.now(KST) + timedelta(minutes=10)

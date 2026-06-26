@@ -25,6 +25,8 @@ DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8000
 ExtractScheduleSourceType = Literal["text", "ocr_text", "manual", "other"]
 SaveScheduleSourceType = Literal["text", "ocr_text", "manual", "calendar", "other"]
+RouteProfileAction = Literal["save", "list"]
+ErrandAction = Literal["save", "list"]
 
 
 def _env_int(name: str, default: int) -> int:
@@ -104,6 +106,26 @@ class SaveRoutineResult(BaseModel):
     routine_id: str
     summary: str
     how_it_will_be_used: str
+
+
+class RouteProfileToolResult(BaseModel):
+    action: str
+    saved: bool = False
+    profile_id: str = ""
+    profile: dict = Field(default_factory=dict)
+    profiles: list[dict] = Field(default_factory=list)
+    summary: str
+    warning: str | None = None
+
+
+class ErrandToolResult(BaseModel):
+    action: str
+    saved: bool = False
+    errand_id: str = ""
+    errand: dict = Field(default_factory=dict)
+    errands: list[dict] = Field(default_factory=list)
+    summary: str
+    warning: str | None = None
 
 
 class DailyRouteBriefingResult(BaseModel):
@@ -394,6 +416,90 @@ def find_places_on_route(
             max_detour_minutes=max_detour_minutes,
             preferred_area=preferred_area,
         )
+    )
+
+
+@mcp.tool(
+    name="manage_route_profile",
+    description="Save or list route profiles such as home-to-office or office-to-home preferences.",
+    annotations=ToolAnnotations(
+        title="동선 프로필 저장/조회",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    ),
+)
+def manage_route_profile(
+    action: RouteProfileAction = Field(description="수행할 작업입니다. save 또는 list입니다."),
+    workspace_id: str = Field(default=DEFAULT_WORKSPACE_ID, description="워크스페이스 ID입니다. 기본값은 default입니다."),
+    profile_name: str = Field(default="", description="저장할 동선 프로필 이름입니다. 예: 평일 출근길"),
+    origin: str = Field(default="", description="기본 출발지입니다."),
+    destination: str = Field(default="", description="기본 도착지입니다."),
+    preferences: dict = Field(default_factory=dict, description="선호 조건입니다. 예: {'avoid': ['도보 많은 경로'], 'buffer_minutes': 20}"),
+    limit: int = Field(default=20, description="list 작업에서 조회할 최대 개수입니다."),
+) -> RouteProfileToolResult:
+    if action == "save":
+        if not profile_name:
+            return RouteProfileToolResult(
+                action=action,
+                summary="동선 프로필 이름이 필요합니다.",
+                warning="profile_name을 입력해 주세요.",
+            )
+        return RouteProfileToolResult(
+            action=action,
+            **service.save_route_profile(
+                workspace_id=workspace_id,
+                profile_name=profile_name,
+                origin=origin,
+                destination=destination,
+                preferences=preferences,
+            ),
+        )
+    return RouteProfileToolResult(
+        action=action,
+        **service.list_route_profiles(workspace_id=workspace_id, limit=limit),
+    )
+
+
+@mcp.tool(
+    name="manage_errand",
+    description="Save or list errands used for route stop recommendations.",
+    annotations=ToolAnnotations(
+        title="심부름 저장/조회",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    ),
+)
+def manage_errand(
+    action: ErrandAction = Field(description="수행할 작업입니다. save 또는 list입니다."),
+    workspace_id: str = Field(default=DEFAULT_WORKSPACE_ID, description="워크스페이스 ID입니다. 기본값은 default입니다."),
+    errand_text: str = Field(default="", description="저장할 심부름 내용입니다. 예: 약국 들르기"),
+    category: str = Field(default="", description="심부름 카테고리입니다. 비우면 내용에서 자동 추정합니다."),
+    preferred_area: str = Field(default="", description="선호 지역입니다. 예: 강남, 회사 근처"),
+    limit: int = Field(default=20, description="list 작업에서 조회할 최대 개수입니다."),
+) -> ErrandToolResult:
+    if action == "save":
+        if not errand_text:
+            return ErrandToolResult(
+                action=action,
+                summary="심부름 내용이 필요합니다.",
+                warning="errand_text를 입력해 주세요.",
+            )
+        return ErrandToolResult(
+            action=action,
+            **service.save_errand(
+                workspace_id=workspace_id,
+                errand_text=errand_text,
+                category=category,
+                preferred_area=preferred_area,
+            ),
+        )
+    return ErrandToolResult(
+        action=action,
+        **service.list_errands(workspace_id=workspace_id, limit=limit),
     )
 
 
