@@ -386,3 +386,86 @@ def test_car_route_uses_rest_key_when_mobility_key_is_empty(monkeypatch) -> None
     assert result["distance_meters"] == 5000
     assert result["provider"] == "kakao_mobility_directions"
     assert calls[0]["headers"]["Authorization"] == "KakaoAK rest_key_for_route"
+
+
+def test_waypoints_route_uses_multi_waypoint_api(monkeypatch) -> None:
+    calls: list[dict] = []
+    monkeypatch.setenv("ENABLE_REAL_KAKAO_APIS", "true")
+    monkeypatch.setenv("KAKAO_REST_API_KEY", "rest_key_for_route")
+
+    def fake_coordinates(place_text: str) -> dict:
+        index = {"회사": 0, "약국": 1, "카페": 2, "집": 3}.get(place_text, 4)
+        return {
+            "place_text": place_text,
+            "lat": 37.5 + index * 0.01,
+            "lng": 127.0 + index * 0.01,
+            "mock": False,
+        }
+
+    def fake_post_json(url: str, payload: dict, headers: dict | None = None) -> dict:
+        calls.append({"url": url, "payload": payload, "headers": headers or {}})
+        return {
+            "ok": True,
+            "status": 200,
+            "json": {
+                "routes": [
+                    {
+                        "result_code": 0,
+                        "summary": {"duration": 900, "distance": 7000, "fare": {}},
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(dailyroute_service, "resolve_address_or_place_to_coordinates", fake_coordinates)
+    monkeypatch.setattr(dailyroute_service, "_post_json", fake_post_json)
+
+    result = dailyroute_service.estimate_route_duration("회사", "집", waypoints=["약국", "카페"], travel_mode="car")
+
+    assert result["duration_minutes"] == 15
+    assert result["provider"] == "kakao_mobility_waypoints_directions"
+    assert calls[0]["url"].endswith("/v1/waypoints/directions")
+    assert [item["name"] for item in calls[0]["payload"]["waypoints"]] == ["약국", "카페"]
+
+
+def test_future_route_uses_future_directions_api(monkeypatch) -> None:
+    calls: list[dict] = []
+    monkeypatch.setenv("ENABLE_REAL_KAKAO_APIS", "true")
+    monkeypatch.setenv("KAKAO_REST_API_KEY", "rest_key_for_route")
+
+    def fake_coordinates(place_text: str) -> dict:
+        return {
+            "place_text": place_text,
+            "lat": 37.5,
+            "lng": 127.0,
+            "mock": False,
+        }
+
+    def fake_get_json(url: str, params: dict, headers: dict | None = None) -> dict:
+        calls.append({"url": url, "params": params, "headers": headers or {}})
+        return {
+            "ok": True,
+            "status": 200,
+            "json": {
+                "routes": [
+                    {
+                        "result_code": 0,
+                        "summary": {"duration": 1200, "distance": 9000, "fare": {}},
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(dailyroute_service, "resolve_address_or_place_to_coordinates", fake_coordinates)
+    monkeypatch.setattr(dailyroute_service, "_get_json", fake_get_json)
+
+    result = dailyroute_service.estimate_future_route_duration(
+        "회사",
+        "강남역",
+        "2026-06-27T14:00:00+09:00",
+    )
+
+    assert result["duration_minutes"] == 20
+    assert result["provider"] == "kakao_mobility_future_directions"
+    assert calls[0]["url"].endswith("/v1/future/directions")
+    assert calls[0]["params"]["departure_time"] == "202606271400"

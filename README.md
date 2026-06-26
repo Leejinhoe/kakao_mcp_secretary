@@ -136,6 +136,13 @@ DAILYROUTE_DB_PATH=data/dailyroute_guard.db
 - 키가 없거나 API 권한 오류가 나면 fallback 모의 이동시간으로 안전하게 내려갑니다.
 - MVP에서는 이미지 OCR을 서버 안에서 직접 수행하지 않습니다. 이미지에서 OCR된 텍스트를 `extract_schedule_from_text`의 `text`에 넣어 테스트하세요.
 
+### 기능별 사용 API
+
+- 일정과 일정 사이 이동시간 검사: 카카오 Local API로 장소 좌표를 찾고, `travel_mode="car"`일 때 카카오모빌리티 `GET /v1/directions` 자동차 길찾기로 예상 소요시간과 거리를 가져옵니다. 결과를 일정 사이 여유시간과 비교해 지각 위험을 판단합니다.
+- 회사 → 약국 → 카페 → 집 경유지 추천: 카카오 Local API로 약국/카페 후보를 찾고, 후보 조합을 카카오모빌리티 `POST /v1/waypoints/directions` 다중 경유지 길찾기로 비교해 가장 덜 돌아가는 경로를 추천합니다.
+- 약속 1시간 전 교통상황 확인: route watch가 due 상태가 되면 현재 출발지에서 약속 장소까지 `GET /v1/directions`를 다시 호출해 현재 이동시간을 확인합니다. 남은 시간보다 이동시간+버퍼가 크면 경고 로그를 만듭니다.
+- 출발 데드라인 계산: 일일 브리핑은 일정 시작 약 1시간 전 출발을 기준으로 카카오모빌리티 `GET /v1/future/directions` 미래 운행 정보 길찾기를 먼저 시도합니다. 실패하면 fallback 이동시간으로 출발 마감 시간을 계산합니다.
+
 ### 카카오 로그인 흐름
 
 1. GPT/PlayMCP에서 `health_check`를 호출하면 `kakao_login_url`이 함께 반환됩니다.
