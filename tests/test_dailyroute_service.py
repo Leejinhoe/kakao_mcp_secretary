@@ -3,11 +3,31 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 import dailyroute_service
 from dailyroute_service import DailyRouteService
 
 
 KST = timezone(timedelta(hours=9))
+
+
+@pytest.fixture(autouse=True)
+def isolate_runtime_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("DAILYROUTE_SECRETS_PATH", str(tmp_path / "missing-secrets.local.json"))
+    for key in (
+        "DAILYROUTE_DB_PATH",
+        "ENABLE_REAL_KAKAO_APIS",
+        "KAKAO_REST_API_KEY",
+        "KAKAO_MOBILITY_API_KEY",
+        "KAKAO_CLIENT_SECRET",
+        "KAKAO_ACCESS_TOKEN",
+        "KAKAO_REDIRECT_URI",
+        "KAKAO_OAUTH_SCOPES",
+        "KAKAO_CALENDAR_ID",
+        "PUBLIC_BASE_URL",
+    ):
+        monkeypatch.delenv(key, raising=False)
 
 
 def build_service(tmp_path: Path) -> DailyRouteService:
