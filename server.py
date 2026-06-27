@@ -25,7 +25,7 @@ DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8000
 ExtractScheduleSourceType = Literal["text", "ocr_text", "manual", "other"]
 SaveScheduleSourceType = Literal["text", "ocr_text", "manual", "calendar", "other"]
-RoutePreferenceTarget = Literal["route_profile", "errand", "routine"]
+RoutePreferenceTarget = Literal["route_profile", "errand", "routine", "api_config"]
 RoutePreferenceAction = Literal["save", "list"]
 
 
@@ -114,6 +114,8 @@ class RoutePreferenceToolResult(BaseModel):
     routine_id: str = ""
     routine: dict = Field(default_factory=dict)
     routines: list[dict] = Field(default_factory=list)
+    api_config: dict = Field(default_factory=dict)
+    ignored_keys: list[str] = Field(default_factory=list)
     summary: str
     how_it_will_be_used: str = ""
     warning: str | None = None
@@ -170,7 +172,10 @@ route_watch_scheduler = _start_route_watch_scheduler()
 
 
 def _public_base_url_from_request(request: Request) -> str:
-    configured = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+    configured = (
+        os.getenv("PUBLIC_BASE_URL", "")
+        or service.list_api_config(DEFAULT_WORKSPACE_ID).get("api_config", {}).get("PUBLIC_BASE_URL", {}).get("value", "")
+    ).rstrip("/")
     if configured:
         return configured
     forwarded_proto = request.headers.get("x-forwarded-proto", request.url.scheme)
@@ -179,11 +184,16 @@ def _public_base_url_from_request(request: Request) -> str:
 
 
 def _kakao_redirect_uri_from_request(request: Request) -> str:
-    return os.getenv("KAKAO_REDIRECT_URI", "") or f"{_public_base_url_from_request(request)}/oauth/kakao/callback"
+    configured = (
+        os.getenv("KAKAO_REDIRECT_URI", "")
+        or service.list_api_config(DEFAULT_WORKSPACE_ID).get("api_config", {}).get("KAKAO_REDIRECT_URI", {}).get("value", "")
+    )
+    return configured or f"{_public_base_url_from_request(request)}/oauth/kakao/callback"
 
 
 def _default_kakao_login_url() -> str:
-    base_url = os.getenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+    base_url = service.list_api_config(DEFAULT_WORKSPACE_ID).get("api_config", {}).get("PUBLIC_BASE_URL", {}).get("value") or os.getenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000")
+    base_url = base_url.rstrip("/")
     return f"{base_url}/oauth/kakao/login?workspace_id={DEFAULT_WORKSPACE_ID}"
 
 
@@ -422,7 +432,7 @@ def find_places_on_route(
     ),
 )
 def manage_route_preferences(
-    target: RoutePreferenceTarget = Field(description="관리할 대상입니다. route_profile, errand, routine 중 하나입니다."),
+    target: RoutePreferenceTarget = Field(description="관리할 대상입니다. route_profile, errand, routine, api_config 중 하나입니다."),
     action: RoutePreferenceAction = Field(description="수행할 작업입니다. save 또는 list입니다."),
     workspace_id: str = Field(default=DEFAULT_WORKSPACE_ID, description="워크스페이스 ID입니다. 기본값은 default입니다."),
     profile_name: str = Field(default="", description="route_profile 저장 시 사용할 동선 프로필 이름입니다."),
@@ -438,6 +448,7 @@ def manage_route_preferences(
     preferred_buffer_minutes: int | None = Field(default=None, description="선호 여유 시간입니다."),
     avoid_conditions: list[str] = Field(default_factory=list, description="피하고 싶은 조건입니다."),
     preferences: dict = Field(default_factory=dict, description="route_profile 선호 조건입니다."),
+    api_config: dict = Field(default_factory=dict, description="api_config 저장 시 사용할 설정 dict입니다. 예: {'ENABLE_REAL_KAKAO_APIS':'true','KAKAO_REST_API_KEY':'...'}"),
     limit: int = Field(default=20, description="list 작업에서 조회할 최대 개수입니다."),
 ) -> RoutePreferenceToolResult:
     workspace_id = workspace_id if isinstance(workspace_id, str) else DEFAULT_WORKSPACE_ID
@@ -453,9 +464,24 @@ def manage_route_preferences(
     active_days = active_days if isinstance(active_days, list) else []
     avoid_conditions = avoid_conditions if isinstance(avoid_conditions, list) else []
     preferences = preferences if isinstance(preferences, dict) else {}
+    api_config = api_config if isinstance(api_config, dict) else {}
     preferred_buffer_minutes = preferred_buffer_minutes if isinstance(preferred_buffer_minutes, int) else None
     limit = limit if isinstance(limit, int) else 20
 
+    if target == "api_config":
+        if action == "save":
+            if not api_config:
+                return RoutePreferenceToolResult(target=target, action=action, summary="저장할 API 설정이 필요합니다.", warning="api_config dict를 입력해 주세요.")
+            return RoutePreferenceToolResult(
+                target=target,
+                action=action,
+                **service.save_api_config(workspace_id=workspace_id, api_config=api_config),
+            )
+        return RoutePreferenceToolResult(
+            target=target,
+            action=action,
+            **service.list_api_config(workspace_id=workspace_id),
+        )
     if target == "route_profile":
         if action == "save":
             if not profile_name:

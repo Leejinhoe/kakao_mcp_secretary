@@ -266,6 +266,30 @@ def test_errand_can_be_saved_and_listed(tmp_path: Path) -> None:
     assert listed["errands"][0]["id"] == saved["errand_id"]
 
 
+def test_api_config_can_be_saved_and_read_by_helpers(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DAILYROUTE_DB_PATH", str(tmp_path / "dailyroute-config.db"))
+    monkeypatch.delenv("ENABLE_REAL_KAKAO_APIS", raising=False)
+    monkeypatch.delenv("KAKAO_REST_API_KEY", raising=False)
+    service = DailyRouteService()
+
+    saved = service.save_api_config(
+        workspace_id="default",
+        api_config={
+            "ENABLE_REAL_KAKAO_APIS": "true",
+            "KAKAO_REST_API_KEY": "rest_key_for_test",
+            "PUBLIC_BASE_URL": "https://example.test",
+        },
+    )
+    listed = service.list_api_config("default")
+
+    assert saved["saved"] is True
+    assert saved["api_config"]["KAKAO_REST_API_KEY"] == "rest...test"
+    assert listed["api_config"]["KAKAO_REST_API_KEY"]["value"] == "rest...test"
+    assert dailyroute_service._mock_mode() is False
+    assert dailyroute_service._rest_api_key() == "rest_key_for_test"
+    assert dailyroute_service._public_base_url() == "https://example.test"
+
+
 def test_route_watch_creates_due_alert(tmp_path: Path) -> None:
     service = build_service(tmp_path)
     start = datetime.now(KST) + timedelta(minutes=10)

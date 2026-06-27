@@ -27,6 +27,22 @@ KAKAO_LOCAL_ADDRESS_URL = "https://dapi.kakao.com/v2/local/search/address.json"
 KAKAO_MOBILITY_DIRECTIONS_URL = "https://apis-navi.kakaomobility.com/v1/directions"
 KAKAO_MOBILITY_WAYPOINTS_DIRECTIONS_URL = "https://apis-navi.kakaomobility.com/v1/waypoints/directions"
 KAKAO_MOBILITY_FUTURE_DIRECTIONS_URL = "https://apis-navi.kakaomobility.com/v1/future/directions"
+ALLOWED_API_CONFIG_KEYS = {
+    "ENABLE_REAL_KAKAO_APIS",
+    "KAKAO_REST_API_KEY",
+    "KAKAO_MOBILITY_API_KEY",
+    "KAKAO_CLIENT_SECRET",
+    "KAKAO_REDIRECT_URI",
+    "KAKAO_OAUTH_SCOPES",
+    "KAKAO_CALENDAR_ID",
+    "PUBLIC_BASE_URL",
+    "ENABLE_ROUTE_WATCH_SCHEDULER",
+}
+SECRET_API_CONFIG_KEYS = {
+    "KAKAO_REST_API_KEY",
+    "KAKAO_MOBILITY_API_KEY",
+    "KAKAO_CLIENT_SECRET",
+}
 
 ScheduleType = Literal["meeting", "deadline", "appointment", "personal", "routine", "errand", "other"]
 ScheduleSourceType = Literal["text", "ocr_text", "manual", "calendar", "other"]
@@ -290,24 +306,54 @@ def _env_enabled(name: str) -> bool:
     return os.getenv(name, "").lower() in {"1", "true", "yes", "on"}
 
 
+def _db_config_value(name: str, workspace_id: str = DEFAULT_WORKSPACE_ID) -> str:
+    try:
+        db_path = _resolve_db_path("data/dailyroute_guard.db")
+        with sqlite3.connect(db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT config_value
+                FROM api_configs
+                WHERE config_key = ? AND workspace_id IN (?, ?)
+                ORDER BY CASE WHEN workspace_id = ? THEN 0 ELSE 1 END
+                LIMIT 1
+                """,
+                (name, workspace_id or DEFAULT_WORKSPACE_ID, DEFAULT_WORKSPACE_ID, workspace_id or DEFAULT_WORKSPACE_ID),
+            ).fetchone()
+        return str(row[0]) if row else ""
+    except Exception:
+        return ""
+
+
+def _config_value(name: str, default: str = "", workspace_id: str = DEFAULT_WORKSPACE_ID) -> str:
+    env_value = os.getenv(name, "")
+    if env_value:
+        return env_value
+    return _db_config_value(name, workspace_id) or default
+
+
+def _config_enabled(name: str) -> bool:
+    return _config_value(name).lower() in {"1", "true", "yes", "on"}
+
+
 def _mock_mode() -> bool:
-    return not _env_enabled("ENABLE_REAL_KAKAO_APIS")
+    return not (_env_enabled("ENABLE_REAL_KAKAO_APIS") or _config_enabled("ENABLE_REAL_KAKAO_APIS"))
 
 
 def _rest_api_key() -> str:
-    return os.getenv("KAKAO_REST_API_KEY", "")
+    return _config_value("KAKAO_REST_API_KEY")
 
 
 def _mobility_api_key() -> str:
-    return os.getenv("KAKAO_MOBILITY_API_KEY") or _rest_api_key()
+    return _config_value("KAKAO_MOBILITY_API_KEY") or _rest_api_key()
 
 
 def _local_api_key() -> str:
-    return _rest_api_key() or os.getenv("KAKAO_MOBILITY_API_KEY", "")
+    return _rest_api_key() or _config_value("KAKAO_MOBILITY_API_KEY")
 
 
 def _public_base_url() -> str:
-    return os.getenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+    return _config_value("PUBLIC_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 
 
 def _kakao_login_url_for_workspace(workspace_id: str) -> str:
@@ -404,7 +450,7 @@ def build_talk_calendar_event_payload(schedule: dict[str, Any]) -> dict[str, Any
     if schedule.get("location_text"):
         event["location"] = {"name": schedule.get("location_text", "")}
     return {
-        "calendar_id": os.getenv("KAKAO_CALENDAR_ID", "primary"),
+        "calendar_id": _config_value("KAKAO_CALENDAR_ID", "primary"),
         "event": event,
     }
 
@@ -472,7 +518,7 @@ def list_talk_calendar_events_if_configured(
         }
     result = _get_json(
         "https://kapi.kakao.com/v2/api/calendar/events",
-        {"calendar_id": os.getenv("KAKAO_CALENDAR_ID", "primary"), "from": start_at, "to": end_at},
+        {"calendar_id": _config_value("KAKAO_CALENDAR_ID", "primary"), "from": start_at, "to": end_at},
         {"Authorization": f"Bearer {token}"},
     )
     if result["ok"]:
@@ -1066,6 +1112,16 @@ class DailyRouteService:
                     PRIMARY KEY (workspace_id, provider)
                 );
 
+                CREATE TABLE IF NOT EXISTS api_configs (
+                    workspace_id TEXT NOT NULL,
+                    config_key TEXT NOT NULL,
+                    config_value TEXT NOT NULL,
+                    is_secret INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (workspace_id, config_key)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_schedules_workspace_start
                 ON schedules (workspace_id, start_at);
 
@@ -1087,6 +1143,80 @@ class DailyRouteService:
         with self._connect() as connection:
             row = connection.execute(query, params).fetchone()
         return dict(row) if row else None
+
+    def _mask_api_config_value(self, key: str, value: str) -> str:
+        if key not in SECRET_API_CONFIG_KEYS:
+            return value
+        if not value:
+            return ""
+        if len(value) <= 8:
+            return "****"
+        return f"{value[:4]}...{value[-4:]}"
+
+    def save_api_config(self, workspace_id: str, api_config: dict[str, Any]) -> dict[str, Any]:
+        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        now = _now_iso()
+        stored: dict[str, str] = {}
+        ignored: list[str] = []
+        with self._connect() as connection:
+            for raw_key, raw_value in (api_config or {}).items():
+                key = str(raw_key).strip()
+                if key not in ALLOWED_API_CONFIG_KEYS:
+                    ignored.append(key)
+                    continue
+                if raw_value is None:
+                    ignored.append(key)
+                    continue
+                value = str(raw_value).strip()
+                if not value:
+                    ignored.append(key)
+                    continue
+                is_secret = 1 if key in SECRET_API_CONFIG_KEYS else 0
+                connection.execute(
+                    """
+                    INSERT INTO api_configs (
+                        workspace_id, config_key, config_value, is_secret, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(workspace_id, config_key) DO UPDATE SET
+                        config_value = excluded.config_value,
+                        is_secret = excluded.is_secret,
+                        updated_at = excluded.updated_at
+                    """,
+                    (normalized_workspace, key, value, is_secret, now, now),
+                )
+                stored[key] = self._mask_api_config_value(key, value)
+            connection.commit()
+        return {
+            "saved": bool(stored),
+            "api_config": stored,
+            "ignored_keys": ignored,
+            "summary": f"API 설정 {len(stored)}개를 저장했습니다.",
+            "warning": "민감한 키 값은 응답에서 마스킹했습니다." if stored else "저장된 API 설정이 없습니다.",
+        }
+
+    def list_api_config(self, workspace_id: str) -> dict[str, Any]:
+        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        rows = self._fetch_all(
+            """
+            SELECT config_key, config_value, is_secret, updated_at
+            FROM api_configs
+            WHERE workspace_id = ?
+            ORDER BY config_key
+            """,
+            (normalized_workspace,),
+        )
+        config = {
+            row["config_key"]: {
+                "value": self._mask_api_config_value(row["config_key"], row["config_value"]),
+                "is_secret": bool(row["is_secret"]),
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        }
+        return {
+            "api_config": config,
+            "summary": f"API 설정 {len(config)}개를 조회했습니다.",
+        }
 
     def _save_kakao_token(self, workspace_id: str, token_response: dict[str, Any]) -> dict[str, Any]:
         normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
@@ -1142,7 +1272,7 @@ class DailyRouteService:
         }
 
     def build_kakao_oauth_login_url(self, workspace_id: str, redirect_uri: str) -> dict[str, Any]:
-        rest_key = os.getenv("KAKAO_REST_API_KEY", "")
+        rest_key = _rest_api_key()
         normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
         if not rest_key:
             return {
@@ -1172,7 +1302,7 @@ class DailyRouteService:
             "redirect_uri": redirect_uri,
             "state": state,
         }
-        scopes = _normalize_spaces(os.getenv("KAKAO_OAUTH_SCOPES", "talk_message"))
+        scopes = _normalize_spaces(_config_value("KAKAO_OAUTH_SCOPES", "talk_message"))
         if scopes:
             params["scope"] = scopes
         return {
@@ -1198,7 +1328,7 @@ class DailyRouteService:
             connection.execute("DELETE FROM oauth_states WHERE state = ?", (state,))
             connection.commit()
 
-        rest_key = os.getenv("KAKAO_REST_API_KEY", "")
+        rest_key = _rest_api_key()
         if not rest_key:
             return {"success": False, "summary": "KAKAO_REST_API_KEY가 없습니다.", "warning": "환경변수를 먼저 설정하세요."}
         token_request = {
@@ -1207,7 +1337,7 @@ class DailyRouteService:
             "redirect_uri": redirect_uri or saved_state["redirect_uri"],
             "code": code,
         }
-        client_secret = os.getenv("KAKAO_CLIENT_SECRET", "")
+        client_secret = _config_value("KAKAO_CLIENT_SECRET")
         if client_secret:
             token_request["client_secret"] = client_secret
         token_result = _form_post_json(KAKAO_OAUTH_TOKEN_URL, token_request)
@@ -1283,7 +1413,7 @@ class DailyRouteService:
         }
 
     def _refresh_kakao_token(self, workspace_id: str, refresh_token: str) -> dict[str, Any]:
-        rest_key = os.getenv("KAKAO_REST_API_KEY", "")
+        rest_key = _rest_api_key()
         if not rest_key:
             return {"available": False, "access_token": "", "source": "db", "warning": "KAKAO_REST_API_KEY가 없어 토큰 갱신을 못했습니다."}
         refresh_request = {
@@ -1291,7 +1421,7 @@ class DailyRouteService:
             "client_id": rest_key,
             "refresh_token": refresh_token,
         }
-        client_secret = os.getenv("KAKAO_CLIENT_SECRET", "")
+        client_secret = _config_value("KAKAO_CLIENT_SECRET")
         if client_secret:
             refresh_request["client_secret"] = client_secret
         refresh_result = _form_post_json(KAKAO_OAUTH_TOKEN_URL, refresh_request)

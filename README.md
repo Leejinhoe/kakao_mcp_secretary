@@ -107,9 +107,31 @@ Inspector 설정:
 - 카카오 OAuth를 쓸 경우 배포 도메인을 `PUBLIC_BASE_URL`에 넣고, 카카오 Developers의 Redirect URI에 `https://배포도메인/oauth/kakao/callback`을 등록하세요.
 - 기존에 제한 단어가 들어간 서버 카드로 등록했다면 삭제 후 새 이름으로 다시 등록하는 편이 안전합니다.
 
-## 8. 카카오 API 연동 환경변수
+## 8. 카카오 API 설정
 
 키가 없어도 서버는 동작하며 mock/fallback 결과를 한국어로 표시합니다.
+
+PlayMCP에 환경변수 입력 기능이 없다면 `manage_route_preferences` 도구로 API 설정을 SQLite에 저장하세요.
+
+```json
+{
+  "target": "api_config",
+  "action": "save",
+  "api_config": {
+    "ENABLE_REAL_KAKAO_APIS": "true",
+    "KAKAO_REST_API_KEY": "카카오_REST_API_키",
+    "KAKAO_MOBILITY_API_KEY": "카카오_REST_API_키",
+    "PUBLIC_BASE_URL": "https://배포주소",
+    "KAKAO_REDIRECT_URI": "https://배포주소/oauth/kakao/callback",
+    "KAKAO_OAUTH_SCOPES": "talk_message",
+    "KAKAO_CALENDAR_ID": "primary"
+  }
+}
+```
+
+저장된 설정은 `manage_route_preferences`에서 `target="api_config"`, `action="list"`로 확인할 수 있습니다. REST API 키처럼 민감한 값은 응답에서 마스킹됩니다.
+
+로컬 실행이나 env 입력이 가능한 플랫폼에서는 아래 환경변수로도 설정할 수 있습니다.
 
 ```bash
 ENABLE_REAL_KAKAO_APIS=true

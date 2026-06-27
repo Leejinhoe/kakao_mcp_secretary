@@ -17,7 +17,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY server.py dailyroute_service.py README.md ./
 
 EXPOSE 8000
 

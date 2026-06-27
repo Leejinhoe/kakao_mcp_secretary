@@ -1,7 +1,13 @@
+.git
+.agents
+.codex
 .venv
 __pycache__
 .pytest_cache
 *.pyc
-data/
-.git/
 .env
+.env.*
+!.env.example
+.DS_Store
+data
+tests
