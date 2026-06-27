@@ -290,6 +290,21 @@ def test_api_config_can_be_saved_and_read_by_helpers(tmp_path: Path, monkeypatch
     assert dailyroute_service._public_base_url() == "https://example.test"
 
 
+def test_local_secrets_file_can_feed_api_config(tmp_path: Path, monkeypatch) -> None:
+    secrets_path = tmp_path / "secrets.local.json"
+    secrets_path.write_text(
+        '{"ENABLE_REAL_KAKAO_APIS":"true","KAKAO_REST_API_KEY":"rest_from_file","KAKAO_CALENDAR_ID":"primary"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DAILYROUTE_SECRETS_PATH", str(secrets_path))
+    monkeypatch.delenv("ENABLE_REAL_KAKAO_APIS", raising=False)
+    monkeypatch.delenv("KAKAO_REST_API_KEY", raising=False)
+
+    assert dailyroute_service._mock_mode() is False
+    assert dailyroute_service._rest_api_key() == "rest_from_file"
+    assert dailyroute_service._config_value("KAKAO_CALENDAR_ID") == "primary"
+
+
 def test_route_watch_creates_due_alert(tmp_path: Path) -> None:
     service = build_service(tmp_path)
     start = datetime.now(KST) + timedelta(minutes=10)

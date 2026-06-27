@@ -17,6 +17,7 @@ from uuid import uuid4
 
 DEFAULT_WORKSPACE_ID = "default"
 DB_PATH_ENV = "DAILYROUTE_DB_PATH"
+SECRETS_PATH_ENV = "DAILYROUTE_SECRETS_PATH"
 KST = timezone(timedelta(hours=9))
 KAKAO_OAUTH_AUTHORIZE_URL = "https://kauth.kakao.com/oauth/authorize"
 KAKAO_OAUTH_TOKEN_URL = "https://kauth.kakao.com/oauth/token"
@@ -325,11 +326,27 @@ def _db_config_value(name: str, workspace_id: str = DEFAULT_WORKSPACE_ID) -> str
         return ""
 
 
+def _local_secrets_path() -> Path:
+    return Path(os.getenv(SECRETS_PATH_ENV, "secrets.local.json"))
+
+
+def _file_config_value(name: str) -> str:
+    path = _local_secrets_path()
+    if not path.exists():
+        return ""
+    try:
+        values = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    value = values.get(name, "")
+    return str(value).strip() if value is not None else ""
+
+
 def _config_value(name: str, default: str = "", workspace_id: str = DEFAULT_WORKSPACE_ID) -> str:
     env_value = os.getenv(name, "")
     if env_value:
         return env_value
-    return _db_config_value(name, workspace_id) or default
+    return _db_config_value(name, workspace_id) or _file_config_value(name) or default
 
 
 def _config_enabled(name: str) -> bool:

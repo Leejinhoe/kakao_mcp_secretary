@@ -107,6 +107,58 @@ Inspector 설정:
 - 카카오 OAuth를 쓸 경우 배포 도메인을 `PUBLIC_BASE_URL`에 넣고, 카카오 Developers의 Redirect URI에 `https://배포도메인/oauth/kakao/callback`을 등록하세요.
 - 기존에 제한 단어가 들어간 서버 카드로 등록했다면 삭제 후 새 이름으로 다시 등록하는 편이 안전합니다.
 
+### GHCR 이미지로 배포하기
+
+PlayMCP가 GitHub 저장소 빌드가 아니라 Registry 이미지를 받는 경우, 로컬에서 secrets 파일을 포함한 Docker 이미지를 빌드해 GHCR에 push합니다.
+
+1. 로컬 프로젝트 루트에 `secrets.local.json`을 만듭니다. 이 파일은 `.gitignore`에 포함되어 GitHub에 올라가지 않습니다.
+
+```json
+{
+  "ENABLE_REAL_KAKAO_APIS": "true",
+  "KAKAO_REST_API_KEY": "카카오_REST_API_키",
+  "KAKAO_MOBILITY_API_KEY": "카카오_REST_API_키",
+  "KAKAO_OAUTH_SCOPES": "talk_message",
+  "KAKAO_CALENDAR_ID": "primary"
+}
+```
+
+2. Docker 이미지를 빌드합니다.
+
+```bash
+docker build -t mcp-secretary:v1.0.0 .
+```
+
+3. GHCR용 태그를 붙입니다.
+
+```bash
+docker tag mcp-secretary:v1.0.0 ghcr.io/marriage1210/mcp-secretary:v1.0.0
+```
+
+4. GHCR에 로그인합니다. GitHub PAT에는 `write:packages`, `read:packages` 권한이 필요합니다.
+
+```bash
+echo "GitHub_PAT" | docker login ghcr.io -u marriage1210 --password-stdin
+```
+
+5. 이미지를 push합니다.
+
+```bash
+docker push ghcr.io/marriage1210/mcp-secretary:v1.0.0
+```
+
+6. PlayMCP 이미지 등록 화면에는 다음처럼 입력합니다.
+
+```text
+Registry 호스트: ghcr.io
+Registry 사용자: marriage1210
+Registry 비밀번호: GitHub PAT
+image_name: marriage1210/mcp-secretary
+image_tag: v1.0.0
+```
+
+Docker 이미지는 `secrets.local.json`을 포함하므로 GHCR 패키지는 private으로 유지하세요.
+
 ## 8. 카카오 API 설정
 
 키가 없어도 서버는 동작하며 mock/fallback 결과를 한국어로 표시합니다.
