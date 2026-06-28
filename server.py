@@ -217,10 +217,7 @@ route_watch_scheduler = _start_route_watch_scheduler()
 
 
 def _public_base_url_from_request(request: Request) -> str:
-    configured = (
-        os.getenv("PUBLIC_BASE_URL", "")
-        or service.list_api_config(DEFAULT_WORKSPACE_ID).get("api_config", {}).get("PUBLIC_BASE_URL", {}).get("value", "")
-    ).rstrip("/")
+    configured = service.runtime_config_value("PUBLIC_BASE_URL", "", DEFAULT_WORKSPACE_ID).rstrip("/")
     if configured:
         return configured
     forwarded_proto = request.headers.get("x-forwarded-proto", request.url.scheme)
@@ -229,15 +226,12 @@ def _public_base_url_from_request(request: Request) -> str:
 
 
 def _kakao_redirect_uri_from_request(request: Request) -> str:
-    configured = (
-        os.getenv("KAKAO_REDIRECT_URI", "")
-        or service.list_api_config(DEFAULT_WORKSPACE_ID).get("api_config", {}).get("KAKAO_REDIRECT_URI", {}).get("value", "")
-    )
+    configured = service.runtime_config_value("KAKAO_REDIRECT_URI", "", DEFAULT_WORKSPACE_ID)
     return configured or f"{_public_base_url_from_request(request)}/oauth/kakao/callback"
 
 
 def _default_kakao_login_url() -> str:
-    base_url = service.list_api_config(DEFAULT_WORKSPACE_ID).get("api_config", {}).get("PUBLIC_BASE_URL", {}).get("value") or os.getenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000")
+    base_url = service.runtime_config_value("PUBLIC_BASE_URL", "http://127.0.0.1:8000", DEFAULT_WORKSPACE_ID)
     base_url = base_url.rstrip("/")
     return f"{base_url}/oauth/kakao/login?workspace_id={DEFAULT_WORKSPACE_ID}"
 

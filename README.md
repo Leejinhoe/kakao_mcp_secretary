@@ -161,7 +161,7 @@ Registry 호스트: ghcr.io
 Registry 사용자: Leejinhoe
 Registry 비밀번호: GitHub PAT
 image_name: leejinhoe/mcp-secretary
-image_tag: v1.0.5
+image_tag: v1.0.6
 ```
 
 Docker 이미지는 `secrets.local.json`을 포함하므로 GHCR 패키지는 private으로 유지하세요.

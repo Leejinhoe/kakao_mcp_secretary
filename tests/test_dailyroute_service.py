@@ -403,6 +403,27 @@ def test_local_secrets_file_can_feed_api_config(tmp_path: Path, monkeypatch) -> 
     assert dailyroute_service._config_value("KAKAO_CALENDAR_ID") == "primary"
 
 
+def test_local_secrets_override_stale_db_api_config(tmp_path: Path, monkeypatch) -> None:
+    secrets_path = tmp_path / "secrets.local.json"
+    secrets_path.write_text(
+        '{"PUBLIC_BASE_URL":"https://fresh.example","KAKAO_REDIRECT_URI":"https://fresh.example/oauth/kakao/callback"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DAILYROUTE_DB_PATH", str(tmp_path / "stale-config.db"))
+    monkeypatch.setenv("DAILYROUTE_SECRETS_PATH", str(secrets_path))
+    service = DailyRouteService()
+    service.save_api_config(
+        workspace_id="default",
+        api_config={
+            "PUBLIC_BASE_URL": "https://stale.example",
+            "KAKAO_REDIRECT_URI": "https://stale.example/oauth/kakao/callback",
+        },
+    )
+
+    assert dailyroute_service._config_value("PUBLIC_BASE_URL") == "https://fresh.example"
+    assert dailyroute_service._config_value("KAKAO_REDIRECT_URI") == "https://fresh.example/oauth/kakao/callback"
+
+
 def test_route_watch_creates_due_alert(tmp_path: Path) -> None:
     service = build_service(tmp_path)
     start = datetime.now(KST) + timedelta(minutes=10)

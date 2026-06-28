@@ -346,7 +346,7 @@ def _config_value(name: str, default: str = "", workspace_id: str = DEFAULT_WORK
     env_value = os.getenv(name, "")
     if env_value:
         return env_value
-    return _db_config_value(name, workspace_id) or _file_config_value(name) or default
+    return _file_config_value(name) or _db_config_value(name, workspace_id) or default
 
 
 def _config_enabled(name: str) -> bool:
@@ -1030,6 +1030,9 @@ class DailyRouteService:
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def runtime_config_value(self, name: str, default: str = "", workspace_id: str = DEFAULT_WORKSPACE_ID) -> str:
+        return _config_value(name, default, workspace_id)
 
     def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         existing_columns = {
