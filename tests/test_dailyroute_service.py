@@ -208,6 +208,84 @@ def test_check_day_feasibility_warns_for_impossible_route(tmp_path: Path) -> Non
     assert any("안양에서 강남까지 모의 차량 이동시간 기준 예상 이동 시간이 48분" in warning for warning in result["warnings"])
 
 
+def test_save_schedule_returns_route_advice_from_previous_schedule(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+    service.save_schedule(
+        workspace_id="test",
+        title="화성 집결",
+        start_at="2026-06-27T08:20:00+09:00",
+        end_at="2026-06-27T09:00:00+09:00",
+        date_text="2026-06-27",
+        time_text="오전 8시 20분",
+        location_text="화성",
+        schedule_type="meeting",
+        source_type="manual",
+        reminder_minutes=60,
+        save_to_talk_calendar=False,
+        allow_conflict=False,
+    )
+
+    result = service.save_schedule(
+        workspace_id="test",
+        title="출판사 미팅",
+        start_at="2026-06-27T14:00:00+09:00",
+        end_at="2026-06-27T15:00:00+09:00",
+        date_text="2026-06-27",
+        time_text="오후 2시",
+        location_text="출판사",
+        schedule_type="meeting",
+        source_type="manual",
+        reminder_minutes=60,
+        save_to_talk_calendar=False,
+        allow_conflict=False,
+    )
+
+    assert result["route_advice"]["checked"] is True
+    assert result["route_advice"]["origin"] == "화성"
+    assert result["route_advice"]["destination"] == "출판사"
+    assert result["route_advice"]["recommended_departure_time"]
+
+
+def test_schedule_crud_is_workspace_scoped(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+    saved_a = service.save_schedule(
+        workspace_id="user-a",
+        title="A 일정",
+        start_at="2026-06-27T10:00:00+09:00",
+        end_at="2026-06-27T11:00:00+09:00",
+        date_text="2026-06-27",
+        time_text="오전 10시",
+        location_text="강남",
+        schedule_type="meeting",
+        source_type="manual",
+        reminder_minutes=60,
+        save_to_talk_calendar=False,
+        allow_conflict=False,
+    )
+    service.save_schedule(
+        workspace_id="user-b",
+        title="B 일정",
+        start_at="2026-06-27T10:00:00+09:00",
+        end_at="2026-06-27T11:00:00+09:00",
+        date_text="2026-06-27",
+        time_text="오전 10시",
+        location_text="강남",
+        schedule_type="meeting",
+        source_type="manual",
+        reminder_minutes=60,
+        save_to_talk_calendar=False,
+        allow_conflict=False,
+    )
+
+    listed_a = service.list_schedules("user-a", date_text="2026-06-27")
+    listed_b = service.list_schedules("user-b", date_text="2026-06-27")
+    delete_wrong_workspace = service.delete_schedule("user-b", saved_a["schedule_id"])
+
+    assert [item["title"] for item in listed_a["schedules"]] == ["A 일정"]
+    assert [item["title"] for item in listed_b["schedules"]] == ["B 일정"]
+    assert delete_wrong_workspace["deleted"] is False
+
+
 def test_find_places_on_route_returns_mock_stops(tmp_path: Path) -> None:
     service = build_service(tmp_path)
 

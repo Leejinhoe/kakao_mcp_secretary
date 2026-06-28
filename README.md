@@ -14,6 +14,7 @@ DailyRoute Guard(생활동선 캘린더 가드)는 텍스트나 OCR 텍스트에
 
 - 텍스트 또는 OCR 텍스트에서 일정 후보 추출
 - 일정 저장 및 중복/겹침 감지
+- 저장 직후 이전 일정과의 이동 가능성 자동 검사
 - 하루 일정 사이 이동 가능성 검사
 - 약국, 카페, 프린트샵 같은 생활 경유지 추천
 - 출퇴근/반복 루틴 저장
@@ -25,13 +26,19 @@ DailyRoute Guard(생활동선 캘린더 가드)는 텍스트나 OCR 텍스트에
 
 1. `health_check`: 서버 상태 확인
 2. `extract_schedule_from_text`: 텍스트/OCR 텍스트에서 일정 추출
-3. `save_schedule`: 일정 저장 및 중복 경고
-4. `check_day_feasibility`: 하루 일정의 이동 가능성 확인
-5. `find_places_on_route`: 동선 중 심부름 경유지 추천
-6. `manage_route_preferences`: 동선 프로필, 심부름, 생활 루틴 저장/조회
-7. `build_daily_route_briefing`: 일일 동선 브리핑 생성
-8. `create_route_watch`: 일정 전 경로 감시 등록
-9. `get_route_alerts`: 최근 경로 경고 조회
+3. `save_schedule`: 일정 저장, 중복 경고, 자동 이동 가능성 확인
+4. `list_schedules`: 워크스페이스별 일정 조회
+5. `update_schedule`: 일정 수정 및 이동 가능성 재확인
+6. `delete_schedule`: 일정 삭제
+7. `check_conflict`: 저장 전 일정 충돌 확인
+8. `check_day_feasibility`: 하루 일정의 이동 가능성 확인
+9. `find_places_on_route`: 동선 중 심부름 경유지 추천
+10. `manage_route_preferences`: 동선 프로필, 심부름, 생활 루틴 저장/조회
+11. `connect_kakao_calendar`: 카카오 캘린더 연결 상태와 로그인 URL 확인
+12. `sync_to_talk_calendar`: 저장된 일정을 톡캘린더에 동기화
+13. `build_daily_route_briefing`: 일일 동선 브리핑 생성
+14. `create_route_watch`: 일정 전 경로 감시 등록
+15. `get_route_alerts`: 최근 경로 경고 조회
 
 ## 5. 로컬 실행 방법
 
@@ -118,7 +125,7 @@ PlayMCP가 GitHub 저장소 빌드가 아니라 Registry 이미지를 받는 경
   "ENABLE_REAL_KAKAO_APIS": "true",
   "KAKAO_REST_API_KEY": "카카오_REST_API_키",
   "KAKAO_MOBILITY_API_KEY": "카카오_REST_API_키",
-  "KAKAO_OAUTH_SCOPES": "talk_message talk_calendar",
+  "KAKAO_OAUTH_SCOPES": "talk_message,talk_calendar",
   "KAKAO_CALENDAR_ID": "primary"
 }
 ```
@@ -151,10 +158,10 @@ docker push ghcr.io/marriage1210/mcp-secretary:v1.0.0
 
 ```text
 Registry 호스트: ghcr.io
-Registry 사용자: marriage1210
+Registry 사용자: Leejinhoe
 Registry 비밀번호: GitHub PAT
-image_name: marriage1210/mcp-secretary
-image_tag: v1.0.0
+image_name: leejinhoe/mcp-secretary
+image_tag: v1.0.4
 ```
 
 Docker 이미지는 `secrets.local.json`을 포함하므로 GHCR 패키지는 private으로 유지하세요.
@@ -163,25 +170,7 @@ Docker 이미지는 `secrets.local.json`을 포함하므로 GHCR 패키지는 pr
 
 키가 없어도 서버는 동작하며 mock/fallback 결과를 한국어로 표시합니다.
 
-PlayMCP에 환경변수 입력 기능이 없다면 `manage_route_preferences` 도구로 API 설정을 SQLite에 저장하세요.
-
-```json
-{
-  "target": "api_config",
-  "action": "save",
-  "api_config": {
-    "ENABLE_REAL_KAKAO_APIS": "true",
-    "KAKAO_REST_API_KEY": "카카오_REST_API_키",
-    "KAKAO_MOBILITY_API_KEY": "카카오_REST_API_키",
-    "PUBLIC_BASE_URL": "https://배포주소",
-    "KAKAO_REDIRECT_URI": "https://배포주소/oauth/kakao/callback",
-    "KAKAO_OAUTH_SCOPES": "talk_message talk_calendar",
-    "KAKAO_CALENDAR_ID": "primary"
-  }
-}
-```
-
-저장된 설정은 `manage_route_preferences`에서 `target="api_config"`, `action="list"`로 확인할 수 있습니다. REST API 키처럼 민감한 값은 응답에서 마스킹됩니다.
+공개 MCP tool에는 API 키 조회/저장 도구를 노출하지 않습니다. PlayMCP에 환경변수 입력 기능이 없다면 `secrets.local.json`을 로컬에서만 만들고, private GHCR 이미지에 포함해 배포하세요.
 
 로컬 실행이나 env 입력이 가능한 플랫폼에서는 아래 환경변수로도 설정할 수 있습니다.
 
@@ -192,7 +181,7 @@ KAKAO_MOBILITY_API_KEY=
 KAKAO_ACCESS_TOKEN=
 KAKAO_CLIENT_SECRET=
 KAKAO_REDIRECT_URI=http://127.0.0.1:8000/oauth/kakao/callback
-KAKAO_OAUTH_SCOPES=talk_message talk_calendar
+KAKAO_OAUTH_SCOPES=talk_message,talk_calendar
 KAKAO_CALENDAR_ID=primary
 PUBLIC_BASE_URL=http://127.0.0.1:8000
 DAILYROUTE_DB_PATH=data/dailyroute_guard.db
@@ -203,7 +192,7 @@ DAILYROUTE_DB_PATH=data/dailyroute_guard.db
 - `KAKAO_MOBILITY_API_KEY`는 비워도 `KAKAO_REST_API_KEY`를 자동차 길찾기 API 키로 사용합니다. 분리 관리하고 싶으면 같은 REST API 키를 `KAKAO_MOBILITY_API_KEY`에도 넣으면 됩니다.
 - `KAKAO_REDIRECT_URI`는 카카오 Developers에 등록한 Redirect URI와 정확히 같아야 합니다.
 - `KAKAO_CLIENT_SECRET`이 켜져 있는 앱이면 token 발급 때 필요합니다.
-- `KAKAO_OAUTH_SCOPES`는 나에게 보내기와 톡캘린더 생성을 위해 `talk_message talk_calendar`를 권장합니다. 카카오 Developers의 동의항목에서 톡캘린더 권한을 켜고, scope ID가 다르게 표시되면 콘솔 값을 기준으로 바꾸세요.
+- `KAKAO_OAUTH_SCOPES`는 나에게 보내기와 톡캘린더 생성을 위해 `talk_message,talk_calendar`를 권장합니다. 카카오 OAuth `scope`는 쉼표로 구분되며, 카카오 Developers의 동의항목에서 scope ID가 다르게 표시되면 콘솔 값을 기준으로 바꾸세요.
 - OAuth 로그인 후 저장된 access token으로 `save_schedule(save_to_talk_calendar=true)`는 톡캘린더 생성 API를, `build_daily_route_briefing(send_to_me=true)`와 route watch 알림은 나에게 보내기 API를 시도합니다.
 - `check_day_feasibility`에서 `travel_mode="car"`이면 카카오모빌리티 자동차 길찾기 API로 차량 이동시간을 시도합니다.
 - `travel_mode="transit_estimate"` 또는 `walking_estimate`이면 카카오 Local 좌표 조회 후 거리 기반 대중교통/도보 예상시간을 계산합니다. 공개 자동차 길찾기 API와 달리 실시간 대중교통 경로 검색은 아니므로 결과에 provider가 표시됩니다.
