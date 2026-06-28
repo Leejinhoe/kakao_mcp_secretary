@@ -133,13 +133,13 @@ PlayMCP가 GitHub 저장소 빌드가 아니라 Registry 이미지를 받는 경
 2. Docker 이미지를 빌드합니다.
 
 ```bash
-docker build --platform linux/amd64 -t mcp-secretary:v1.0.7 .
+docker build --platform linux/amd64 -t mcp-secretary:v1.0.8 .
 ```
 
 3. GHCR용 태그를 붙입니다.
 
 ```bash
-docker tag mcp-secretary:v1.0.7 ghcr.io/leejinhoe/mcp-secretary:v1.0.7
+docker tag mcp-secretary:v1.0.8 ghcr.io/leejinhoe/mcp-secretary:v1.0.8
 ```
 
 4. GHCR에 로그인합니다. GitHub PAT에는 `write:packages`, `read:packages` 권한이 필요합니다.
@@ -151,7 +151,7 @@ echo "GitHub_PAT" | docker login ghcr.io -u Leejinhoe --password-stdin
 5. 이미지를 push합니다.
 
 ```bash
-docker push ghcr.io/leejinhoe/mcp-secretary:v1.0.7
+docker push ghcr.io/leejinhoe/mcp-secretary:v1.0.8
 ```
 
 6. PlayMCP 이미지 등록 화면에는 다음처럼 입력합니다.
@@ -161,7 +161,7 @@ Registry 호스트: ghcr.io
 Registry 사용자: Leejinhoe
 Registry 비밀번호: GitHub PAT
 image_name: leejinhoe/mcp-secretary
-image_tag: v1.0.7
+image_tag: v1.0.8
 ```
 
 Docker 이미지는 `secrets.local.json`을 포함하므로 GHCR 패키지는 private으로 유지하세요.
@@ -187,15 +187,15 @@ PUBLIC_BASE_URL=http://127.0.0.1:8000
 DAILYROUTE_DB_PATH=data/dailyroute_guard.db
 ```
 
-- 키 없이 동작: 일정 추출, 일정 저장, 중복 경고, SQLite 저장, 모의 이동시간, 모의 경유지 추천, 경로 감시 로그
+- 키 없이 동작: 일정 추출, 일정 저장, 중복 경고, SQLite 저장, 자동차 기준 모의 이동시간, 모의 경유지 추천, 경로 감시 로그
 - `KAKAO_REST_API_KEY`가 있으면 카카오 OAuth 로그인 URL을 만들 수 있고, 카카오 Local 장소 검색을 실제 API로 시도합니다.
 - `KAKAO_MOBILITY_API_KEY`는 비워도 `KAKAO_REST_API_KEY`를 자동차 길찾기 API 키로 사용합니다. 분리 관리하고 싶으면 같은 REST API 키를 `KAKAO_MOBILITY_API_KEY`에도 넣으면 됩니다.
 - `KAKAO_REDIRECT_URI`는 카카오 Developers에 등록한 Redirect URI와 정확히 같아야 합니다.
 - `KAKAO_CLIENT_SECRET`이 켜져 있는 앱이면 token 발급 때 필요합니다.
 - `KAKAO_OAUTH_SCOPES`는 나에게 보내기와 톡캘린더 생성을 위해 `talk_message,talk_calendar`를 권장합니다. 카카오 OAuth `scope`는 쉼표로 구분되며, 카카오 Developers의 동의항목에서 scope ID가 다르게 표시되면 콘솔 값을 기준으로 바꾸세요.
 - OAuth 로그인 후 저장된 access token으로 `save_schedule(save_to_talk_calendar=true)`는 톡캘린더 생성 API를, `build_daily_route_briefing(send_to_me=true)`와 route watch 알림은 나에게 보내기 API를 시도합니다.
-- `check_day_feasibility`에서 `travel_mode="car"`이면 카카오모빌리티 자동차 길찾기 API로 차량 이동시간을 시도합니다.
-- `travel_mode="transit_estimate"` 또는 `walking_estimate`이면 카카오 Local 좌표 조회 후 거리 기반 대중교통/도보 예상시간을 계산합니다. 공개 자동차 길찾기 API와 달리 실시간 대중교통 경로 검색은 아니므로 결과에 provider가 표시됩니다.
+- `check_day_feasibility`는 `travel_mode="car"`만 지원하며 카카오모빌리티 자동차 길찾기 API로 차량 이동시간을 시도합니다.
+- 대중교통/도보 이동시간은 부정확한 좌표 기반 추정값을 제공하지 않기 위해 지원하지 않습니다.
 - 키가 없거나 API 권한 오류가 나면 fallback 모의 이동시간으로 안전하게 내려갑니다.
 - MVP에서는 이미지 OCR을 서버 안에서 직접 수행하지 않습니다. 이미지에서 OCR된 텍스트를 `extract_schedule_from_text`의 `text`에 넣어 테스트하세요.
 

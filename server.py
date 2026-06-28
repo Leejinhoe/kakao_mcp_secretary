@@ -577,7 +577,7 @@ def check_day_feasibility(
     workspace_id: str = Field(default=DEFAULT_WORKSPACE_ID, description="워크스페이스 ID입니다. 기본값은 default입니다."),
     date: str = Field(description="확인할 날짜입니다. YYYY-MM-DD 형식입니다."),
     default_origin: str = Field(default="", description="장소가 비어 있을 때 사용할 기본 출발지입니다."),
-    travel_mode: TravelMode = Field(default="car", description="이동 방식입니다."),
+    travel_mode: TravelMode = Field(default="car", description="이동 방식입니다. 현재는 car만 지원합니다."),
     buffer_minutes: int = Field(default=15, description="이동 시간 외에 추가로 둘 여유 시간입니다."),
 ) -> DayFeasibilityResult:
     return DayFeasibilityResult(

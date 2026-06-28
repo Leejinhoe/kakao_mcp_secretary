@@ -658,7 +658,7 @@ def test_kakao_oauth_migrates_default_workspace_and_backfills_calendar(
     assert default_rows == []
 
 
-def test_check_day_feasibility_uses_selected_travel_mode(tmp_path: Path) -> None:
+def test_check_day_feasibility_rejects_non_car_travel_mode(tmp_path: Path) -> None:
     service = build_service(tmp_path)
     service.save_schedule(
         workspace_id="test",
@@ -697,8 +697,18 @@ def test_check_day_feasibility_uses_selected_travel_mode(tmp_path: Path) -> None
         buffer_minutes=15,
     )
 
-    assert result["route_checks"][0]["travel_mode"] == "walking_estimate"
-    assert result["route_checks"][0]["provider_mode"] == "모의 도보 이동시간"
+    assert result["feasible"] is False
+    assert result["day_risk_level"] == "high"
+    assert result["route_checks"] == []
+    assert "자동차 이동시간만 지원" in result["warnings"][0]
+
+
+def test_estimate_route_duration_rejects_non_car_mode() -> None:
+    result = dailyroute_service.estimate_route_duration("회사", "집", travel_mode="walking_estimate")
+
+    assert result["unsupported"] is True
+    assert result["duration_minutes"] == 0
+    assert "자동차 이동시간만 지원" in result["warning"]
 
 
 def test_car_route_uses_rest_key_when_mobility_key_is_empty(monkeypatch) -> None:

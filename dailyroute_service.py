@@ -8,7 +8,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from itertools import product
-from math import asin, cos, radians, sin, sqrt
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -51,7 +50,7 @@ SECRET_API_CONFIG_KEYS = {
 ScheduleType = Literal["meeting", "deadline", "appointment", "personal", "routine", "errand", "other"]
 ScheduleSourceType = Literal["text", "ocr_text", "manual", "calendar", "other"]
 RoutineType = Literal["commute", "exercise", "hospital", "study", "work", "weekly", "custom"]
-TravelMode = Literal["car", "transit_estimate", "walking_estimate"]
+TravelMode = Literal["car"]
 NotifyChannel = Literal["kakao_me", "log_only"]
 
 
@@ -756,17 +755,6 @@ def _area_token(place: str) -> str:
     return _normalize_spaces(place)[:2]
 
 
-def _haversine_km(start: dict[str, Any], end: dict[str, Any]) -> float:
-    lat1 = radians(float(start.get("lat") or 0))
-    lng1 = radians(float(start.get("lng") or 0))
-    lat2 = radians(float(end.get("lat") or 0))
-    lng2 = radians(float(end.get("lng") or 0))
-    delta_lat = lat2 - lat1
-    delta_lng = lng2 - lng1
-    a = sin(delta_lat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(delta_lng / 2) ** 2
-    return 6371.0 * 2 * asin(sqrt(a))
-
-
 def _fallback_route_duration(origin: str, destination: str, waypoints: list[str], travel_mode: TravelMode) -> dict[str, Any]:
     locations = [origin, *waypoints, destination]
     total = 0
@@ -783,38 +771,12 @@ def _fallback_route_duration(origin: str, destination: str, waypoints: list[str]
             total += 30
         else:
             total += 50
-    multiplier = {"car": 1.0, "transit_estimate": 1.25, "walking_estimate": 2.8}.get(travel_mode, 1.0)
     return {
-        "duration_minutes": max(1, int((total or 40) * multiplier)),
+        "duration_minutes": max(1, int(total or 40)),
         "distance_meters": 0,
-        "mode": {
-            "car": "모의 차량 이동시간",
-            "transit_estimate": "모의 대중교통 이동시간",
-            "walking_estimate": "모의 도보 이동시간",
-        }.get(travel_mode, "모의 이동시간"),
+        "mode": "모의 차량 이동시간",
         "provider": "fallback",
-        "travel_mode": travel_mode,
-    }
-
-
-def _coordinate_route_duration(origin: str, destination: str, waypoints: list[str], travel_mode: TravelMode) -> dict[str, Any]:
-    coordinates = [resolve_address_or_place_to_coordinates(place) for place in [origin, *waypoints, destination]]
-    if any(item.get("mock") for item in coordinates):
-        return _fallback_route_duration(origin, destination, waypoints, travel_mode)
-    total_km = sum(_haversine_km(start, end) for start, end in zip(coordinates, coordinates[1:]))
-    if travel_mode == "walking_estimate":
-        minutes = int((total_km / 4.5) * 60)
-        mode = "카카오 Local 좌표 기반 도보 예상시간"
-    else:
-        minutes = int((total_km / 24) * 60) + 10
-        mode = "카카오 Local 좌표 기반 대중교통 예상시간"
-    return {
-        "duration_minutes": max(1, minutes),
-        "distance_meters": int(total_km * 1000),
-        "mode": mode,
-        "provider": "kakao_local_distance_estimate",
-        "travel_mode": travel_mode,
-        "note": "대중교통/도보는 공개 자동차 길찾기 API가 아니라 좌표 거리 기반 예상치입니다.",
+        "travel_mode": "car",
     }
 
 
@@ -1007,14 +969,20 @@ def estimate_route_duration(
     origin: str,
     destination: str,
     waypoints: list[str] | None = None,
-    travel_mode: TravelMode = "car",
+    travel_mode: str = "car",
 ) -> dict[str, Any]:
     waypoints = waypoints or []
-    if travel_mode == "car":
-        return _car_route_duration(origin, destination, waypoints)
-    if _mock_mode() or not _local_api_key():
-        return _fallback_route_duration(origin, destination, waypoints, travel_mode)
-    return _coordinate_route_duration(origin, destination, waypoints, travel_mode)
+    if travel_mode != "car":
+        return {
+            "duration_minutes": 0,
+            "distance_meters": 0,
+            "mode": "지원하지 않는 이동 방식",
+            "provider": "unsupported",
+            "travel_mode": travel_mode,
+            "unsupported": True,
+            "warning": "현재는 자동차 이동시간만 지원합니다. 대중교통/도보는 부정확한 추정값을 제공하지 않습니다.",
+        }
+    return _car_route_duration(origin, destination, waypoints)
 
 
 def _errand_category(errand: str) -> tuple[str, str]:
@@ -1913,7 +1881,7 @@ class DailyRouteService:
                 avoid_options = []
             return {
                 "home_location": row.get("home_location", ""),
-                "default_transport": row.get("default_transport", "car") or "car",
+                "default_transport": "car" if row.get("default_transport", "car") == "car" else "unsupported",
                 "buffer_minutes": int(row.get("buffer_minutes") or 15),
                 "avoid_options": avoid_options,
             }
@@ -1934,7 +1902,7 @@ class DailyRouteService:
             preferences = {}
         return {
             "home_location": preferences.get("home_location") or profile.get("origin", ""),
-            "default_transport": preferences.get("default_transport") or preferences.get("travel_mode") or "car",
+            "default_transport": "car" if (preferences.get("default_transport") or preferences.get("travel_mode") or "car") == "car" else "unsupported",
             "buffer_minutes": int(preferences.get("buffer_minutes") or preferences.get("preferred_buffer_minutes") or 15),
             "avoid_options": preferences.get("avoid_options") or [],
         }
@@ -1966,8 +1934,13 @@ class DailyRouteService:
             }
         preferences = self._route_preferences(workspace_id)
         travel_mode = preferences.get("default_transport", "car")
-        if travel_mode not in {"car", "transit_estimate", "walking_estimate"}:
-            travel_mode = "car"
+        if travel_mode != "car":
+            return {
+                "checked": False,
+                "risk_level": "unknown",
+                "unsupported": True,
+                "message": "현재는 자동차 이동시간만 지원합니다. 대중교통/도보는 부정확한 추정값을 제공하지 않습니다.",
+            }
         buffer_minutes = max(0, int(preferences.get("buffer_minutes") or 15))
         previous = self._adjacent_previous_schedule(workspace_id, schedule.get("start_at", ""), schedule.get("id", ""))
         origin = ""
@@ -2702,6 +2675,18 @@ class DailyRouteService:
     ) -> dict[str, Any]:
         normalized_workspace = self._effective_workspace_id(workspace_id)
         schedules = self._schedules_for_date(normalized_workspace, target_date)
+        if travel_mode != "car":
+            warning = "현재는 자동차 이동시간만 지원합니다. 대중교통/도보는 부정확한 추정값을 제공하지 않습니다."
+            return {
+                "date": target_date,
+                "feasible": False,
+                "day_risk_level": "high",
+                "warnings": [warning],
+                "route_checks": [],
+                "impossible_segments": [],
+                "recommended_adjustments": ["자동차 기준으로 다시 확인하거나, 대중교통/도보는 별도 지도 앱에서 확인하세요."],
+                "summary": warning,
+            }
         warnings: list[str] = []
         route_checks: list[dict[str, Any]] = []
         impossible_segments: list[dict[str, Any]] = []
@@ -2893,7 +2878,7 @@ class DailyRouteService:
         now = _now_iso()
         preferences = preferences or {}
         default_transport = preferences.get("default_transport") or preferences.get("travel_mode") or "car"
-        if default_transport not in {"car", "transit_estimate", "walking_estimate"}:
+        if default_transport != "car":
             default_transport = "car"
         buffer_minutes = int(preferences.get("buffer_minutes") or preferences.get("preferred_buffer_minutes") or 15)
         avoid_options = preferences.get("avoid_options") or preferences.get("avoid_conditions") or []
