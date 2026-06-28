@@ -73,6 +73,8 @@ class SaveScheduleResult(BaseModel):
     schedule_id: str
     schedule: dict = Field(default_factory=dict)
     summary: str
+    user_summary: str = ""
+    detail: dict = Field(default_factory=dict)
     deduplicated: bool = False
     updated_existing: bool = False
     conflict_detected: bool = False

@@ -143,6 +143,8 @@ def test_save_schedule_blocks_duplicate_by_default(tmp_path: Path) -> None:
 
     assert first["saved"] is True
     assert second["saved"] is False
+    assert second["user_summary"] == "'거래처 미팅' 일정은 같은 시간 일정이 있어 저장하지 않았습니다."
+    assert second["detail"]["conflict_candidates"][0]["schedule_id"] == first["schedule_id"]
     assert second["conflict_detected"] is True
     assert second["conflict_candidates"][0]["schedule_id"] == first["schedule_id"]
     assert "이미 내일 오후 3시에" in second["warning"]
@@ -224,6 +226,8 @@ def test_save_schedule_deduplicates_same_time_title_and_place(tmp_path: Path) ->
     assert second["saved"] is True
     assert second["schedule_id"] == first["schedule_id"]
     assert second["deduplicated"] is True
+    assert second["user_summary"].startswith("'보배반점 점심약속' 기존 일정을 업데이트했습니다.")
+    assert second["detail"]["schedule"]["id"] == first["schedule_id"]
     assert len(listed["schedules"]) == 1
     assert "메모 추가" in listed["schedules"][0]["notes"]
 
@@ -305,6 +309,8 @@ def test_save_schedule_returns_route_advice_from_previous_schedule(tmp_path: Pat
     )
 
     assert result["route_advice"]["checked"] is True
+    assert result["user_summary"].startswith("'출판사 미팅' 일정을 저장했습니다.")
+    assert result["detail"]["route_advice"]["checked"] is True
     assert result["route_advice"]["origin"] == "화성"
     assert result["route_advice"]["destination"] == "출판사"
     assert result["route_advice"]["recommended_departure_time"]

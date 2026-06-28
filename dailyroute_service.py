@@ -2145,6 +2145,62 @@ class DailyRouteService:
             ),
         }
 
+    def _save_schedule_response_detail(
+        self,
+        *,
+        schedule: dict[str, Any],
+        conflict_candidates: list[dict[str, Any]],
+        talk_calendar_payload: dict[str, Any],
+        calendar_result: dict[str, Any],
+        kakao_login_url: str,
+        route_advice: dict[str, Any],
+        errand_route_plan: dict[str, Any],
+        auto_route_watch: dict[str, Any],
+        calendar_prompt: str,
+        next_recommended_action: str,
+    ) -> dict[str, Any]:
+        return {
+            "schedule": schedule,
+            "conflict_candidates": conflict_candidates,
+            "talk_calendar_payload": talk_calendar_payload,
+            "calendar_result": calendar_result,
+            "kakao_login_url": kakao_login_url,
+            "route_advice": route_advice,
+            "errand_route_plan": errand_route_plan,
+            "auto_route_watch": auto_route_watch,
+            "calendar_prompt": calendar_prompt,
+            "next_recommended_action": next_recommended_action,
+        }
+
+    def _save_schedule_user_summary(
+        self,
+        *,
+        title: str,
+        saved: bool,
+        deduplicated: bool,
+        conflict_detected: bool,
+        route_advice: dict[str, Any],
+        errand_route_plan: dict[str, Any],
+        calendar_sync_recommended: bool,
+    ) -> str:
+        if not saved and conflict_detected:
+            return f"'{title}' 일정은 같은 시간 일정이 있어 저장하지 않았습니다."
+        if deduplicated:
+            action = "기존 일정을 업데이트했습니다"
+        else:
+            action = "일정을 저장했습니다"
+        extras: list[str] = []
+        if route_advice.get("risk_level") == "high":
+            extras.append("이동 시간 위험이 있습니다")
+        elif route_advice.get("checked"):
+            extras.append("이동 시간을 확인했습니다")
+        if errand_route_plan.get("planned"):
+            extras.append("경유지도 추천했습니다")
+        if calendar_sync_recommended:
+            extras.append("톡캘린더 연동을 물어보세요")
+        suffix = f" ({', '.join(extras)})" if extras else ""
+        return f"'{title}' {action}.{suffix}"
+
     def save_schedule(
         self,
         workspace_id: str,
@@ -2226,11 +2282,37 @@ class DailyRouteService:
                 warning_parts.append(calendar_result["message"])
             if route_advice.get("checked") and route_advice.get("risk_level") == "high":
                 warning_parts.append(route_advice["message"])
+            calendar_prompt = "톡캘린더에도 연동할까요? 원하면 sync_to_talk_calendar를 실행하세요." if not save_to_talk_calendar else ""
+            next_action = errand_route_plan.get("summary") or route_advice.get("message") or "기존 일정을 업데이트했습니다."
+            public_schedule = self._schedule_to_public_dict(updated_duplicate)
+            user_summary = self._save_schedule_user_summary(
+                title=updated_duplicate["title"],
+                saved=True,
+                deduplicated=True,
+                conflict_detected=False,
+                route_advice=route_advice,
+                errand_route_plan=errand_route_plan,
+                calendar_sync_recommended=not save_to_talk_calendar,
+            )
+            detail = self._save_schedule_response_detail(
+                schedule=public_schedule,
+                conflict_candidates=[],
+                talk_calendar_payload=sync_result.get("payload", {}),
+                calendar_result=calendar_result,
+                kakao_login_url=sync_result.get("kakao_login_url", ""),
+                route_advice=route_advice,
+                errand_route_plan=errand_route_plan,
+                auto_route_watch=auto_route_watch,
+                calendar_prompt=calendar_prompt,
+                next_recommended_action=next_action,
+            )
             return {
                 "saved": True,
                 "schedule_id": duplicate["id"],
-                "schedule": self._schedule_to_public_dict(updated_duplicate),
-                "summary": f"'{updated_duplicate['title']}' 일정은 중복으로 판단해 기존 일정을 업데이트했습니다.",
+                "schedule": public_schedule,
+                "summary": user_summary,
+                "user_summary": user_summary,
+                "detail": detail,
                 "deduplicated": True,
                 "updated_existing": True,
                 "conflict_detected": False,
@@ -2239,12 +2321,12 @@ class DailyRouteService:
                 "talk_calendar_payload": sync_result.get("payload", {}),
                 "calendar_result": calendar_result,
                 "calendar_sync_recommended": not save_to_talk_calendar,
-                "calendar_prompt": "톡캘린더에도 연동할까요? 원하면 sync_to_talk_calendar를 실행하세요." if not save_to_talk_calendar else "",
+                "calendar_prompt": calendar_prompt,
                 "kakao_login_url": sync_result.get("kakao_login_url", ""),
                 "route_advice": route_advice,
                 "errand_route_plan": errand_route_plan,
                 "auto_route_watch": auto_route_watch,
-                "next_recommended_action": errand_route_plan.get("summary") or route_advice.get("message") or "기존 일정을 업데이트했습니다.",
+                "next_recommended_action": next_action,
             }
 
         conflict_candidates = self._find_schedule_conflicts(
@@ -2272,10 +2354,34 @@ class DailyRouteService:
                 f"이미 {when_text}에 '{first['title']}' 일정이 저장되어 있습니다. "
                 "같은 시간에 새 일정을 추가해도 되는지 확인한 뒤 allow_conflict=true로 다시 저장하세요."
             )
+            user_summary = self._save_schedule_user_summary(
+                title=title,
+                saved=False,
+                deduplicated=False,
+                conflict_detected=True,
+                route_advice={},
+                errand_route_plan={},
+                calendar_sync_recommended=False,
+            )
+            next_action = "기존 일정을 조정하거나 allow_conflict=true로 다시 저장하세요."
+            detail = self._save_schedule_response_detail(
+                schedule={},
+                conflict_candidates=conflict_candidates,
+                talk_calendar_payload={},
+                calendar_result={},
+                kakao_login_url="",
+                route_advice={},
+                errand_route_plan={},
+                auto_route_watch={},
+                calendar_prompt="",
+                next_recommended_action=next_action,
+            )
             return {
                 "saved": False,
                 "schedule_id": "",
-                "summary": "겹치는 일정이 있어 저장하지 않았습니다.",
+                "summary": user_summary,
+                "user_summary": user_summary,
+                "detail": detail,
                 "conflict_detected": True,
                 "conflict_candidates": conflict_candidates,
                 "warning": warning,
@@ -2287,7 +2393,7 @@ class DailyRouteService:
                 "route_advice": {},
                 "errand_route_plan": {},
                 "auto_route_watch": {},
-                "next_recommended_action": "기존 일정을 조정하거나 allow_conflict=true로 다시 저장하세요.",
+                "next_recommended_action": next_action,
             }
 
         schedule_id = f"sch_{uuid4().hex[:10]}"
@@ -2377,12 +2483,41 @@ class DailyRouteService:
             warning = f"{warning} {route_advice['message']}".strip()
         if errand_route_plan.get("warning"):
             warning = f"{warning} {errand_route_plan['warning']}".strip()
+        calendar_prompt = "톡캘린더에도 연동할까요? 원하면 sync_to_talk_calendar를 실행하세요." if not save_to_talk_calendar else ""
+        kakao_login_url = sync_result.get("kakao_login_url", "") if save_to_talk_calendar else _kakao_login_url_for_workspace(normalized_workspace)
+        next_action = errand_route_plan.get("summary") or route_advice.get("message") or "톡캘린더 연동이 필요하면 sync_to_talk_calendar를 실행하세요."
+        public_schedule = self._schedule_to_public_dict(
+            self._fetch_one("SELECT * FROM schedules WHERE workspace_id = ? AND id = ?", (normalized_workspace, schedule_id)) or saved_schedule
+        )
+        user_summary = self._save_schedule_user_summary(
+            title=title,
+            saved=True,
+            deduplicated=False,
+            conflict_detected=conflict_detected,
+            route_advice=route_advice,
+            errand_route_plan=errand_route_plan,
+            calendar_sync_recommended=not save_to_talk_calendar,
+        )
+        detail = self._save_schedule_response_detail(
+            schedule=public_schedule,
+            conflict_candidates=conflict_candidates,
+            talk_calendar_payload=talk_payload,
+            calendar_result=calendar_result,
+            kakao_login_url=kakao_login_url,
+            route_advice=route_advice,
+            errand_route_plan=errand_route_plan,
+            auto_route_watch=auto_route_watch,
+            calendar_prompt=calendar_prompt,
+            next_recommended_action=next_action,
+        )
 
         return {
             "saved": True,
             "schedule_id": schedule_id,
-            "schedule": self._schedule_to_public_dict(self._fetch_one("SELECT * FROM schedules WHERE workspace_id = ? AND id = ?", (normalized_workspace, schedule_id)) or saved_schedule),
-            "summary": f"'{title}' 일정을 저장했습니다.",
+            "schedule": public_schedule,
+            "summary": user_summary,
+            "user_summary": user_summary,
+            "detail": detail,
             "deduplicated": False,
             "updated_existing": False,
             "conflict_detected": conflict_detected,
@@ -2391,12 +2526,12 @@ class DailyRouteService:
             "talk_calendar_payload": talk_payload,
             "calendar_result": calendar_result,
             "calendar_sync_recommended": not save_to_talk_calendar,
-            "calendar_prompt": "톡캘린더에도 연동할까요? 원하면 sync_to_talk_calendar를 실행하세요." if not save_to_talk_calendar else "",
-            "kakao_login_url": sync_result.get("kakao_login_url", "") if save_to_talk_calendar else _kakao_login_url_for_workspace(normalized_workspace),
+            "calendar_prompt": calendar_prompt,
+            "kakao_login_url": kakao_login_url,
             "route_advice": route_advice,
             "errand_route_plan": errand_route_plan,
             "auto_route_watch": auto_route_watch,
-            "next_recommended_action": errand_route_plan.get("summary") or route_advice.get("message") or "톡캘린더 연동이 필요하면 sync_to_talk_calendar를 실행하세요.",
+            "next_recommended_action": next_action,
         }
 
     def list_schedules(self, workspace_id: str, date_text: str = "", limit: int = 50) -> dict[str, Any]:

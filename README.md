@@ -133,13 +133,13 @@ PlayMCP가 GitHub 저장소 빌드가 아니라 Registry 이미지를 받는 경
 2. Docker 이미지를 빌드합니다.
 
 ```bash
-docker build --platform linux/amd64 -t mcp-secretary:v1.0.8 .
+docker build --platform linux/amd64 -t mcp-secretary:v1.0.9 .
 ```
 
 3. GHCR용 태그를 붙입니다.
 
 ```bash
-docker tag mcp-secretary:v1.0.8 ghcr.io/leejinhoe/mcp-secretary:v1.0.8
+docker tag mcp-secretary:v1.0.9 ghcr.io/leejinhoe/mcp-secretary:v1.0.9
 ```
 
 4. GHCR에 로그인합니다. GitHub PAT에는 `write:packages`, `read:packages` 권한이 필요합니다.
@@ -151,7 +151,7 @@ echo "GitHub_PAT" | docker login ghcr.io -u Leejinhoe --password-stdin
 5. 이미지를 push합니다.
 
 ```bash
-docker push ghcr.io/leejinhoe/mcp-secretary:v1.0.8
+docker push ghcr.io/leejinhoe/mcp-secretary:v1.0.9
 ```
 
 6. PlayMCP 이미지 등록 화면에는 다음처럼 입력합니다.
@@ -161,7 +161,7 @@ Registry 호스트: ghcr.io
 Registry 사용자: Leejinhoe
 Registry 비밀번호: GitHub PAT
 image_name: leejinhoe/mcp-secretary
-image_tag: v1.0.8
+image_tag: v1.0.9
 ```
 
 Docker 이미지는 `secrets.local.json`을 포함하므로 GHCR 패키지는 private으로 유지하세요.
