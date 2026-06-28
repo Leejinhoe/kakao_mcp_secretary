@@ -71,14 +71,21 @@ class ExtractScheduleResult(BaseModel):
 class SaveScheduleResult(BaseModel):
     saved: bool
     schedule_id: str
+    schedule: dict = Field(default_factory=dict)
     summary: str
+    deduplicated: bool = False
+    updated_existing: bool = False
     conflict_detected: bool = False
     conflict_candidates: list[dict] = Field(default_factory=list)
     warning: str | None = None
     talk_calendar_payload: dict = Field(default_factory=dict)
     calendar_result: dict = Field(default_factory=dict)
+    calendar_sync_recommended: bool = False
+    calendar_prompt: str = ""
     kakao_login_url: str = ""
     route_advice: dict = Field(default_factory=dict)
+    errand_route_plan: dict = Field(default_factory=dict)
+    auto_route_watch: dict = Field(default_factory=dict)
     next_recommended_action: str
 
 
@@ -93,6 +100,9 @@ class UpdateScheduleResult(BaseModel):
     conflict_detected: bool = False
     conflict_candidates: list[dict] = Field(default_factory=list)
     route_advice: dict = Field(default_factory=dict)
+    calendar_result: dict = Field(default_factory=dict)
+    kakao_login_url: str = ""
+    auto_route_watch: dict = Field(default_factory=dict)
     summary: str
     warning: str | None = None
 
@@ -100,6 +110,8 @@ class UpdateScheduleResult(BaseModel):
 class DeleteScheduleResult(BaseModel):
     deleted: bool
     schedule: dict = Field(default_factory=dict)
+    calendar_result: dict = Field(default_factory=dict)
+    kakao_login_url: str = ""
     summary: str
     warning: str | None = None
 
@@ -126,6 +138,7 @@ class PlacesOnRouteResult(BaseModel):
     selected_places: list[dict] = Field(default_factory=list)
     rejected_places: list[dict] = Field(default_factory=list)
     estimated_extra_time: int
+    route_evaluation: dict = Field(default_factory=dict)
     warning: str | None = None
     summary: str
 
@@ -179,6 +192,7 @@ class KakaoCalendarConnectionResult(BaseModel):
     authenticated: bool
     workspace_id: str
     kakao_login_url: str
+    pending_local_schedule_count: int = 0
     summary: str
     warning: str | None = None
 
@@ -308,10 +322,13 @@ async def kakao_oauth_callback(request: Request) -> HTMLResponse | JSONResponse:
     if request.query_params.get("format") == "json":
         return JSONResponse(result, status_code=200 if result.get("success") else 400)
     if result.get("success"):
+        backfill = result.get("calendar_backfill", {})
         return HTMLResponse(
-            """
+            f"""
             <h1>DailyRoute Guard 카카오 연동 완료</h1>
-            <p>토큰이 저장되었습니다. 이제 GPT/PlayMCP에서 일정 저장 또는 브리핑 전송을 다시 실행하세요.</p>
+            <p>토큰이 저장되었습니다. 사용자 워크스페이스: {result.get("workspace_id", "")}</p>
+            <p>기존 로컬 일정 {backfill.get("attempted", 0)}건 중 {backfill.get("synced", 0)}건을 톡캘린더와 자동 동기화했습니다.</p>
+            <p>이제 GPT/PlayMCP에서 일정 저장 또는 브리핑 전송을 다시 실행하세요.</p>
             <p>이 창은 닫아도 됩니다.</p>
             """
         )

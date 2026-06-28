@@ -88,6 +88,27 @@ def test_extract_schedule_from_text_warns_when_image_is_provided(tmp_path: Path)
     assert any("OCR 텍스트" in warning for warning in result["warnings"])
 
 
+def test_extract_schedule_detects_errand_and_destination(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+
+    result = service.extract_schedule_from_text(
+        workspace_id="test",
+        text="오늘 약국들렀다 3시에 오산시청 보배반점에서 점심약속 있어",
+        source_type="text",
+        default_timezone="Asia/Seoul",
+        reference_date="2026-06-28",
+    )
+
+    schedule = result["schedules"][0]
+    assert schedule["title"] == "점심약속"
+    assert schedule["date_text"] == "오늘"
+    assert schedule["time_text"] == "3시"
+    assert schedule["start_at"] == "2026-06-28T15:00:00+09:00"
+    assert schedule["location_text"] == "오산시청 보배반점"
+    assert schedule["schedule_type"] == "personal"
+    assert schedule["detected_errands"] == ["약국 들르기"]
+
+
 def test_save_schedule_blocks_duplicate_by_default(tmp_path: Path) -> None:
     service = build_service(tmp_path)
 
@@ -162,6 +183,49 @@ def test_save_schedule_can_allow_conflict(tmp_path: Path) -> None:
     assert result["saved"] is True
     assert result["conflict_detected"] is True
     assert result["talk_calendar_payload"]["event"]["title"] == "거래처 미팅"
+
+
+def test_save_schedule_deduplicates_same_time_title_and_place(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+
+    first = service.save_schedule(
+        workspace_id="test",
+        title="보배반점 점심약속",
+        start_at="2026-06-28T15:00:00+09:00",
+        end_at="2026-06-28T16:00:00+09:00",
+        date_text="오늘",
+        time_text="3시",
+        location_text="오산시청 보배반점",
+        schedule_type="personal",
+        source_type="manual",
+        reminder_minutes=60,
+        save_to_talk_calendar=False,
+        allow_conflict=False,
+        notes="처음 저장",
+    )
+    second = service.save_schedule(
+        workspace_id="test",
+        title="보배반점 점심약속",
+        start_at="2026-06-28T15:00:00+09:00",
+        end_at="2026-06-28T16:00:00+09:00",
+        date_text="오늘",
+        time_text="3시",
+        location_text="오산시청 보배반점",
+        schedule_type="personal",
+        source_type="manual",
+        reminder_minutes=60,
+        save_to_talk_calendar=False,
+        allow_conflict=False,
+        notes="메모 추가",
+    )
+    listed = service.list_schedules("test", date_text="2026-06-28")
+
+    assert first["saved"] is True
+    assert second["saved"] is True
+    assert second["schedule_id"] == first["schedule_id"]
+    assert second["deduplicated"] is True
+    assert len(listed["schedules"]) == 1
+    assert "메모 추가" in listed["schedules"][0]["notes"]
 
 
 def test_check_day_feasibility_warns_for_impossible_route(tmp_path: Path) -> None:
@@ -244,6 +308,38 @@ def test_save_schedule_returns_route_advice_from_previous_schedule(tmp_path: Pat
     assert result["route_advice"]["origin"] == "화성"
     assert result["route_advice"]["destination"] == "출판사"
     assert result["route_advice"]["recommended_departure_time"]
+
+
+def test_save_schedule_recommends_errand_place_near_route(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+    service.save_route_profile(
+        workspace_id="test",
+        profile_name="집 출발",
+        origin="오산시티자이 1단지",
+        destination="오산시청",
+        preferences={"home_location": "오산시티자이 1단지", "buffer_minutes": 15},
+    )
+
+    result = service.save_schedule(
+        workspace_id="test",
+        title="점심약속",
+        start_at="2026-06-28T15:00:00+09:00",
+        end_at="2026-06-28T16:00:00+09:00",
+        date_text="오늘",
+        time_text="3시",
+        location_text="오산시청 보배반점",
+        schedule_type="personal",
+        source_type="text",
+        reminder_minutes=60,
+        save_to_talk_calendar=False,
+        allow_conflict=False,
+        raw_text="오늘 약국들렀다 3시에 오산시청 보배반점에서 점심약속 있어",
+    )
+
+    assert result["route_advice"]["origin"] == "오산시티자이 1단지"
+    assert result["errand_route_plan"]["planned"] is True
+    assert result["errand_route_plan"]["detected_errands"] == ["약국 들르기"]
+    assert "약국" in result["errand_route_plan"]["places_plan"]["recommended_route"]
 
 
 def test_schedule_crud_is_workspace_scoped(tmp_path: Path) -> None:
@@ -494,6 +590,72 @@ def test_kakao_token_storage_can_feed_api_callers(tmp_path: Path) -> None:
     assert token["available"] is True
     assert token["access_token"] == "access_for_test"
     assert service.kakao_auth_status("test")["authenticated"] is True
+
+
+def test_kakao_oauth_migrates_default_workspace_and_backfills_calendar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = build_service(tmp_path)
+    monkeypatch.setenv("KAKAO_REST_API_KEY", "rest_key_for_test")
+
+    saved = service.save_schedule(
+        workspace_id="default",
+        title="기존 로컬 일정",
+        start_at="2026-06-29T10:00:00+09:00",
+        end_at="2026-06-29T11:00:00+09:00",
+        date_text="2026-06-29",
+        time_text="오전 10시",
+        location_text="강남",
+        schedule_type="meeting",
+        source_type="manual",
+        reminder_minutes=60,
+        save_to_talk_calendar=False,
+        allow_conflict=False,
+    )
+    login = service.build_kakao_oauth_login_url("default", "https://service.example/oauth/kakao/callback")
+
+    def fake_form_post_json(url: str, data: dict, headers: dict | None = None) -> dict:
+        return {
+            "ok": True,
+            "json": {
+                "access_token": "access_for_test",
+                "refresh_token": "refresh_for_test",
+                "expires_in": 3600,
+                "refresh_token_expires_in": 7200,
+                "scope": "talk_message,talk_calendar",
+            },
+        }
+
+    def fake_calendar_create(payload: dict, access_token: str = "", auth_url: str = "") -> dict:
+        return {
+            "created": True,
+            "event_id": "event_from_backfill",
+            "payload": payload,
+            "auth_required": False,
+            "auth_url": "",
+            "message": "톡캘린더에 일정을 생성했습니다.",
+        }
+
+    monkeypatch.setattr(dailyroute_service, "_form_post_json", fake_form_post_json)
+    monkeypatch.setattr(dailyroute_service, "fetch_kakao_user_id", lambda access_token: {"ok": True, "kakao_user_id": "12345"})
+    monkeypatch.setattr(dailyroute_service, "create_talk_calendar_event_if_configured", fake_calendar_create)
+
+    result = service.complete_kakao_oauth(
+        code="auth_code",
+        state=login["state"],
+        redirect_uri="https://service.example/oauth/kakao/callback",
+    )
+    migrated = service._fetch_one("SELECT * FROM schedules WHERE workspace_id = ? AND id = ?", ("kakao_12345", saved["schedule_id"]))
+    default_rows = service._fetch_all("SELECT * FROM schedules WHERE workspace_id = ?", ("default",))
+
+    assert result["success"] is True
+    assert result["workspace_id"] == "kakao_12345"
+    assert result["migration_result"]["migrated_schedules"] == 1
+    assert result["calendar_backfill"]["synced"] == 1
+    assert migrated is not None
+    assert migrated["talk_calendar_event_id"] == "event_from_backfill"
+    assert default_rows == []
 
 
 def test_check_day_feasibility_uses_selected_travel_mode(tmp_path: Path) -> None:

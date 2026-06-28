@@ -21,7 +21,10 @@ SECRETS_PATH_ENV = "DAILYROUTE_SECRETS_PATH"
 KST = timezone(timedelta(hours=9))
 KAKAO_OAUTH_AUTHORIZE_URL = "https://kauth.kakao.com/oauth/authorize"
 KAKAO_OAUTH_TOKEN_URL = "https://kauth.kakao.com/oauth/token"
+KAKAO_USER_ME_URL = "https://kapi.kakao.com/v2/user/me"
 KAKAO_CALENDAR_CREATE_EVENT_URL = "https://kapi.kakao.com/v2/api/calendar/create/event"
+KAKAO_CALENDAR_UPDATE_EVENT_URL = "https://kapi.kakao.com/v2/api/calendar/update/event"
+KAKAO_CALENDAR_DELETE_EVENT_URL = "https://kapi.kakao.com/v2/api/calendar/delete/event"
 KAKAO_TALK_MEMO_SEND_URL = "https://kapi.kakao.com/v2/api/talk/memo/default/send"
 KAKAO_LOCAL_KEYWORD_URL = "https://dapi.kakao.com/v2/local/search/keyword.json"
 KAKAO_LOCAL_ADDRESS_URL = "https://dapi.kakao.com/v2/local/search/address.json"
@@ -66,6 +69,14 @@ def _normalize_spaces(text: str) -> str:
 
 def _compact_text(text: str) -> str:
     return re.sub(r"\s+", "", text or "")
+
+
+def _text_similarity(left: str, right: str) -> float:
+    left_tokens = set(re.findall(r"[A-Za-z0-9가-힣]+", _normalize_spaces(left).lower()))
+    right_tokens = set(re.findall(r"[A-Za-z0-9가-힣]+", _normalize_spaces(right).lower()))
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
 
 
 def _resolve_db_path(default_path: str | Path) -> Path:
@@ -168,6 +179,8 @@ def _extract_time_info(text: str) -> tuple[str, str]:
         minute = int(minute_text or "0")
         if meridiem in {"오후", "저녁", "밤"} and hour < 12:
             hour += 12
+        if not meridiem and 1 <= hour <= 7 and any(term in normalized for term in ("점심", "약속", "미팅", "회의", "식사")):
+            hour += 12
         if meridiem == "새벽" and hour == 12:
             hour = 0
         if meridiem == "오전" and hour == 12:
@@ -214,6 +227,8 @@ def _infer_schedule_type(text: str) -> ScheduleType:
         return "deadline"
     if any(term in text for term in ("회의", "미팅", "면담", "콜")):
         return "meeting"
+    if any(term in text for term in ("약속", "점심", "식사", "저녁", "브런치")):
+        return "personal"
     if any(term in text for term in ("병원", "치과", "예약", "진료")):
         return "appointment"
     if any(term in text for term in ("약국", "카페", "프린트", "세탁", "다이소")):
@@ -222,20 +237,64 @@ def _infer_schedule_type(text: str) -> ScheduleType:
 
 
 def _extract_location(text: str) -> str:
+    for place_pattern in (
+        r"오산시청\s*보배반점",
+        r"보배반점",
+        r"강남역",
+        r"역삼역",
+        r"강남",
+        r"안양",
+        r"판교",
+        r"회사",
+        r"집",
+        r"학교",
+        r"병원",
+    ):
+        place_match = re.search(place_pattern, text)
+        if place_match:
+            return _normalize_spaces(place_match.group(0))
     location_matches = re.findall(r"([A-Za-z0-9가-힣._-]{2,30})(?:에서|으로|로)\s", text)
     if location_matches:
         return _normalize_spaces(location_matches[-1])
-    place_match = re.search(r"(강남역|역삼역|강남|안양|판교|회사|집|학교|병원|카페|약국)", text)
-    return place_match.group(1) if place_match else ""
+    fallback_match = re.search(r"(카페|약국)", text)
+    if fallback_match:
+        return fallback_match.group(1)
+    return ""
+
+
+def _extract_errands_from_text(text: str) -> list[str]:
+    errands: list[str] = []
+    patterns = [
+        ("약국", r"약국\s*(?:들르|들렀|갔다|가기|방문)?"),
+        ("카페", r"카페\s*(?:들르|들렀|갔다|가기|방문)?"),
+        ("프린트샵", r"(?:프린트|출력|복사)\s*(?:하|하기|들르|들렀)?"),
+        ("세탁소", r"세탁소\s*(?:들르|들렀|갔다|가기|방문)?"),
+        ("다이소", r"다이소\s*(?:들르|들렀|갔다|가기|방문)?"),
+    ]
+    for label, pattern in patterns:
+        if re.search(pattern, text):
+            errands.append(f"{label} 들르기")
+    return list(dict.fromkeys(errands))
+
+
+def _remove_errand_phrases(text: str) -> str:
+    cleaned = text
+    cleaned = re.sub(r"약국\s*(?:들르(?:고|다)?|들렀다|갔다가|가기|방문하고?)?", " ", cleaned)
+    cleaned = re.sub(r"카페\s*(?:들르(?:고|다)?|들렀다|갔다가|가기|방문하고?)?", " ", cleaned)
+    cleaned = re.sub(r"(?:프린트|출력|복사)\s*(?:하(?:고|기)?|하고|하기)?", " ", cleaned)
+    cleaned = re.sub(r"세탁소\s*(?:들르(?:고|다)?|들렀다|갔다가|가기|방문하고?)?", " ", cleaned)
+    cleaned = re.sub(r"다이소\s*(?:들르(?:고|다)?|들렀다|갔다가|가기|방문하고?)?", " ", cleaned)
+    return _normalize_spaces(cleaned)
 
 
 def _extract_title(text: str, date_text: str, time_text: str, location_text: str) -> str:
-    title = _normalize_spaces(text)
+    title = _remove_errand_phrases(_normalize_spaces(text))
     for value in (date_text, time_text):
         if value:
             title = title.replace(value, " ")
     if location_text:
-        title = re.sub(re.escape(location_text) + r"\s*(에서|으로|로)?", " ", title)
+        location_pattern = r"\s*".join(re.escape(part) for part in location_text.split())
+        title = re.sub(location_pattern + r"\s*(?:에서|으로|로)?", " ", title)
     title = re.sub(r"(있어|있습니다|해야 해|해야 합니다|예정|까지|에|에서|으로|로)", " ", title)
     title = re.sub(r"[.。!?！？]+", " ", title)
     title = _normalize_spaces(title)
@@ -251,6 +310,7 @@ def _extract_schedule_candidate(text: str, source_type: ScheduleSourceType, refe
     title = _extract_title(normalized, date_text, time_text, location_text)
     start_at = _build_datetime(date_iso, time_hm)
     end_at = _infer_end_at(start_at, schedule_type)
+    detected_errands = _extract_errands_from_text(normalized)
 
     missing_fields: list[str] = []
     if not date_text:
@@ -274,6 +334,7 @@ def _extract_schedule_candidate(text: str, source_type: ScheduleSourceType, refe
         "location_text": location_text,
         "schedule_type": schedule_type,
         "source_type": source_type,
+        "detected_errands": detected_errands,
         "confidence_score": confidence,
         "missing_fields": missing_fields,
         "raw_text": normalized,
@@ -527,6 +588,73 @@ def create_talk_calendar_event_if_configured(
     }
 
 
+def update_talk_calendar_event_if_configured(
+    event_id: str,
+    payload: dict[str, Any],
+    access_token: str = "",
+    auth_url: str = "",
+) -> dict[str, Any]:
+    if not event_id:
+        return {"updated": False, "auth_required": False, "auth_url": auth_url, "message": "톡캘린더 event_id가 없어 수정 대신 생성을 시도해야 합니다."}
+    if _mock_mode():
+        return {"updated": False, "event_id": event_id, "payload": payload, "auth_required": False, "auth_url": auth_url, "message": "ENABLE_REAL_KAKAO_APIS가 true가 아니어서 톡캘린더 수정은 생략했습니다."}
+    token = access_token or os.getenv("KAKAO_ACCESS_TOKEN", "")
+    if not token:
+        return {"updated": False, "event_id": event_id, "payload": payload, "auth_required": True, "auth_url": auth_url, "message": "카카오 로그인이 필요합니다."}
+    result = _form_post_json(
+        KAKAO_CALENDAR_UPDATE_EVENT_URL,
+        {
+            "calendar_id": payload.get("calendar_id", "primary"),
+            "event_id": event_id,
+            "event": json.dumps(payload.get("event", {}), ensure_ascii=False),
+        },
+        {"Authorization": f"Bearer {token}"},
+    )
+    if result["ok"]:
+        return {"updated": True, "event_id": event_id, "payload": payload, "auth_required": False, "auth_url": "", "message": "톡캘린더 일정을 수정했습니다."}
+    return {
+        "updated": False,
+        "event_id": event_id,
+        "payload": payload,
+        "auth_required": result.get("status") in {401, 403},
+        "auth_url": auth_url,
+        "message": "톡캘린더 수정 API 호출에 실패했습니다.",
+        "error": result.get("error"),
+    }
+
+
+def delete_talk_calendar_event_if_configured(
+    event_id: str,
+    access_token: str = "",
+    auth_url: str = "",
+) -> dict[str, Any]:
+    if not event_id:
+        return {"deleted": False, "auth_required": False, "auth_url": auth_url, "message": "톡캘린더 event_id가 없어 삭제할 원격 일정이 없습니다."}
+    if _mock_mode():
+        return {"deleted": False, "event_id": event_id, "auth_required": False, "auth_url": auth_url, "message": "ENABLE_REAL_KAKAO_APIS가 true가 아니어서 톡캘린더 삭제는 생략했습니다."}
+    token = access_token or os.getenv("KAKAO_ACCESS_TOKEN", "")
+    if not token:
+        return {"deleted": False, "event_id": event_id, "auth_required": True, "auth_url": auth_url, "message": "카카오 로그인이 필요합니다."}
+    result = _form_post_json(
+        KAKAO_CALENDAR_DELETE_EVENT_URL,
+        {
+            "calendar_id": _config_value("KAKAO_CALENDAR_ID", "primary"),
+            "event_id": event_id,
+        },
+        {"Authorization": f"Bearer {token}"},
+    )
+    if result["ok"]:
+        return {"deleted": True, "event_id": event_id, "auth_required": False, "auth_url": "", "message": "톡캘린더 일정을 삭제했습니다."}
+    return {
+        "deleted": False,
+        "event_id": event_id,
+        "auth_required": result.get("status") in {401, 403},
+        "auth_url": auth_url,
+        "message": "톡캘린더 삭제 API 호출에 실패했습니다.",
+        "error": result.get("error"),
+    }
+
+
 def list_talk_calendar_events_if_configured(
     start_at: str = "",
     end_at: str = "",
@@ -556,6 +684,19 @@ def list_talk_calendar_events_if_configured(
         "requested_range": {"start_at": start_at, "end_at": end_at},
         "error": result.get("error"),
     }
+
+
+def fetch_kakao_user_id(access_token: str) -> dict[str, Any]:
+    if not access_token:
+        return {"ok": False, "kakao_user_id": "", "error": "access_token이 없습니다."}
+    result = _get_json(
+        KAKAO_USER_ME_URL,
+        {},
+        {"Authorization": f"Bearer {access_token}"},
+    )
+    if result.get("ok") and result.get("json", {}).get("id") is not None:
+        return {"ok": True, "kakao_user_id": str(result["json"]["id"])}
+    return {"ok": False, "kakao_user_id": "", "error": result.get("error")}
 
 
 def send_message_to_me_if_configured(message_text: str, access_token: str = "", auth_url: str = "") -> dict[str, Any]:
@@ -1034,6 +1175,106 @@ class DailyRouteService:
     def runtime_config_value(self, name: str, default: str = "", workspace_id: str = DEFAULT_WORKSPACE_ID) -> str:
         return _config_value(name, default, workspace_id)
 
+    def _effective_workspace_id(self, workspace_id: str) -> str:
+        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        if normalized_workspace != DEFAULT_WORKSPACE_ID:
+            return normalized_workspace
+        rows = self._fetch_all(
+            "SELECT workspace_id FROM oauth_tokens WHERE provider = 'kakao' ORDER BY updated_at DESC LIMIT 2",
+            (),
+        )
+        if len(rows) == 1 and rows[0].get("workspace_id"):
+            return rows[0]["workspace_id"]
+        return normalized_workspace
+
+    def _migrate_default_workspace_to_user(self, target_workspace_id: str) -> dict[str, Any]:
+        if not target_workspace_id or target_workspace_id == DEFAULT_WORKSPACE_ID:
+            return {"migrated": False, "migrated_schedules": 0}
+        with self._connect() as connection:
+            schedule_count = connection.execute(
+                "SELECT COUNT(*) FROM schedules WHERE workspace_id = ?",
+                (DEFAULT_WORKSPACE_ID,),
+            ).fetchone()[0]
+            for table in ("schedules", "route_profiles", "routines", "errands", "route_watch_jobs", "route_check_logs", "api_configs"):
+                connection.execute(
+                    f"UPDATE {table} SET workspace_id = ? WHERE workspace_id = ?",
+                    (target_workspace_id, DEFAULT_WORKSPACE_ID),
+                )
+            connection.commit()
+        return {"migrated": bool(schedule_count), "migrated_schedules": int(schedule_count)}
+
+    def _pending_talk_calendar_schedule_count(self, workspace_id: str) -> int:
+        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        row = self._fetch_one(
+            """
+            SELECT COUNT(*) AS count
+            FROM schedules
+            WHERE workspace_id = ?
+              AND start_at != ''
+              AND talk_calendar_event_id = ''
+            """,
+            (normalized_workspace,),
+        )
+        return int((row or {}).get("count") or 0)
+
+    def _sync_unsynced_schedules_to_talk_calendar(
+        self,
+        workspace_id: str,
+        access_token: str,
+        limit: int = 30,
+    ) -> dict[str, Any]:
+        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        rows = self._fetch_all(
+            """
+            SELECT *
+            FROM schedules
+            WHERE workspace_id = ?
+              AND start_at != ''
+              AND talk_calendar_event_id = ''
+            ORDER BY start_at, created_at
+            LIMIT ?
+            """,
+            (normalized_workspace, max(1, min(int(limit or 30), 100))),
+        )
+        results: list[dict[str, Any]] = []
+        synced = 0
+        for schedule in rows:
+            payload = build_talk_calendar_event_payload(schedule)
+            calendar_result = create_talk_calendar_event_if_configured(
+                payload,
+                access_token=access_token,
+                auth_url=_kakao_login_url_for_workspace(normalized_workspace),
+            )
+            event_id = calendar_result.get("event_id", "") if calendar_result.get("created") else ""
+            if event_id:
+                synced += 1
+                with self._connect() as connection:
+                    connection.execute(
+                        """
+                        UPDATE schedules
+                        SET talk_calendar_event_id = ?, updated_at = ?
+                        WHERE workspace_id = ? AND id = ?
+                        """,
+                        (event_id, _now_iso(), normalized_workspace, schedule["id"]),
+                    )
+                    connection.commit()
+            results.append(
+                {
+                    "schedule_id": schedule["id"],
+                    "title": schedule["title"],
+                    "synced": bool(event_id),
+                    "talk_calendar_event_id": event_id,
+                    "message": calendar_result.get("message", ""),
+                }
+            )
+        return {
+            "attempted": len(rows),
+            "synced": synced,
+            "failed": len(rows) - synced,
+            "results": results,
+            "summary": f"기존 일정 {len(rows)}건 중 {synced}건을 톡캘린더에 자동 동기화했습니다.",
+        }
+
     def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         existing_columns = {
             row["name"]
@@ -1214,7 +1455,7 @@ class DailyRouteService:
         return f"{value[:4]}...{value[-4:]}"
 
     def save_api_config(self, workspace_id: str, api_config: dict[str, Any]) -> dict[str, Any]:
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         now = _now_iso()
         stored: dict[str, str] = {}
         ignored: list[str] = []
@@ -1255,7 +1496,7 @@ class DailyRouteService:
         }
 
     def list_api_config(self, workspace_id: str) -> dict[str, Any]:
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         rows = self._fetch_all(
             """
             SELECT config_key, config_value, is_secret, updated_at
@@ -1278,7 +1519,7 @@ class DailyRouteService:
             "summary": f"API 설정 {len(config)}개를 조회했습니다.",
         }
 
-    def _save_kakao_token(self, workspace_id: str, token_response: dict[str, Any]) -> dict[str, Any]:
+    def _save_kakao_token(self, workspace_id: str, token_response: dict[str, Any], kakao_user_id: str = "") -> dict[str, Any]:
         normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
         now = _now_utc()
         expires_in = int(token_response.get("expires_in") or 0)
@@ -1298,10 +1539,11 @@ class DailyRouteService:
             connection.execute(
                 """
                 INSERT INTO oauth_tokens (
-                    workspace_id, provider, access_token, refresh_token, token_type,
+                    workspace_id, kakao_user_id, provider, access_token, refresh_token, token_type,
                     scope, expires_at, refresh_token_expires_at, created_at, updated_at
-                ) VALUES (?, 'kakao', ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, 'kakao', ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workspace_id, provider) DO UPDATE SET
+                    kakao_user_id = excluded.kakao_user_id,
                     access_token = excluded.access_token,
                     refresh_token = excluded.refresh_token,
                     token_type = excluded.token_type,
@@ -1312,6 +1554,7 @@ class DailyRouteService:
                 """,
                 (
                     normalized_workspace,
+                    kakao_user_id or (previous or {}).get("kakao_user_id", ""),
                     token_response.get("access_token", ""),
                     refresh_token,
                     token_response.get("token_type", "bearer"),
@@ -1326,6 +1569,7 @@ class DailyRouteService:
         return {
             "stored": True,
             "workspace_id": normalized_workspace,
+            "kakao_user_id": kakao_user_id or (previous or {}).get("kakao_user_id", ""),
             "expires_at": expires_at,
             "refresh_token_expires_at": refresh_token_expires_at,
             "scope": token_response.get("scope", ""),
@@ -1333,7 +1577,7 @@ class DailyRouteService:
 
     def build_kakao_oauth_login_url(self, workspace_id: str, redirect_uri: str) -> dict[str, Any]:
         rest_key = _rest_api_key()
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         if not rest_key:
             return {
                 "configured": False,
@@ -1408,18 +1652,34 @@ class DailyRouteService:
                 "warning": "Redirect URI, REST API key, Client Secret 설정을 확인하세요.",
                 "error": token_result.get("error"),
             }
-        stored = self._save_kakao_token(saved_state["workspace_id"], token_result["json"])
+        user_result = fetch_kakao_user_id(token_result["json"].get("access_token", ""))
+        kakao_user_id = user_result.get("kakao_user_id", "")
+        requested_workspace = saved_state["workspace_id"] or DEFAULT_WORKSPACE_ID
+        target_workspace = f"kakao_{kakao_user_id}" if kakao_user_id else requested_workspace
+        migration_result = (
+            self._migrate_default_workspace_to_user(target_workspace)
+            if requested_workspace == DEFAULT_WORKSPACE_ID
+            else {"migrated": False, "migrated_schedules": 0}
+        )
+        stored = self._save_kakao_token(target_workspace, token_result["json"], kakao_user_id=kakao_user_id)
+        backfill_result = self._sync_unsynced_schedules_to_talk_calendar(
+            target_workspace,
+            token_result["json"].get("access_token", ""),
+        )
         return {
             "success": True,
-            "summary": "카카오 access_token과 refresh_token을 저장했습니다.",
-            "workspace_id": saved_state["workspace_id"],
+            "summary": "카카오 access_token과 refresh_token을 저장했고, 기존 로컬 일정을 톡캘린더와 동기화했습니다.",
+            "workspace_id": target_workspace,
+            "kakao_user_id": kakao_user_id,
             "scope": stored.get("scope", ""),
             "expires_at": stored.get("expires_at", ""),
             "refresh_token_expires_at": stored.get("refresh_token_expires_at", ""),
+            "migration_result": migration_result,
+            "calendar_backfill": backfill_result,
         }
 
     def kakao_auth_status(self, workspace_id: str) -> dict[str, Any]:
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         if os.getenv("KAKAO_ACCESS_TOKEN"):
             return {
                 "authenticated": True,
@@ -1443,10 +1703,10 @@ class DailyRouteService:
         }
 
     def get_kakao_access_token(self, workspace_id: str) -> dict[str, Any]:
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         env_token = os.getenv("KAKAO_ACCESS_TOKEN", "")
         if env_token:
-            return {"available": True, "access_token": env_token, "source": "env", "warning": None}
+            return {"available": True, "access_token": env_token, "source": "env", "warning": None, "workspace_id": normalized_workspace}
         token = self._fetch_one(
             "SELECT * FROM oauth_tokens WHERE workspace_id = ? AND provider = 'kakao'",
             (normalized_workspace,),
@@ -1458,6 +1718,7 @@ class DailyRouteService:
                 "source": "none",
                 "warning": "카카오 로그인이 필요합니다.",
                 "auth_url": _kakao_login_url_for_workspace(normalized_workspace),
+                "workspace_id": normalized_workspace,
             }
         expires_at = _parse_iso_datetime(token.get("expires_at", ""))
         if expires_at and expires_at <= _now_utc() + timedelta(minutes=5) and token.get("refresh_token"):
@@ -1470,6 +1731,7 @@ class DailyRouteService:
             "source": "db",
             "warning": None,
             "auth_url": "",
+            "workspace_id": normalized_workspace,
         }
 
     def _refresh_kakao_token(self, workspace_id: str, refresh_token: str) -> dict[str, Any]:
@@ -1578,6 +1840,31 @@ class DailyRouteService:
                 )
         return conflicts
 
+    def _find_duplicate_schedule(
+        self,
+        workspace_id: str,
+        title: str,
+        start_at: str,
+        date_text: str,
+        time_text: str,
+        location_text: str,
+    ) -> dict[str, Any] | None:
+        existing = self._fetch_all(
+            "SELECT * FROM schedules WHERE workspace_id = ? ORDER BY updated_at DESC",
+            (workspace_id,),
+        )
+        compact_location = _compact_text(location_text)
+        for schedule in existing:
+            same_time = _same_date_time_text(schedule, date_text, time_text, start_at)
+            same_location = compact_location and _compact_text(schedule.get("location_text", "")) == compact_location
+            similar_title = (
+                _compact_text(schedule.get("title", "")) == _compact_text(title)
+                or _text_similarity(schedule.get("title", ""), title) >= 0.5
+            )
+            if same_time and same_location and similar_title:
+                return schedule
+        return None
+
     def _schedule_to_public_dict(self, schedule: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": schedule.get("id", ""),
@@ -1614,7 +1901,7 @@ class DailyRouteService:
         }
 
     def _route_preferences(self, workspace_id: str) -> dict[str, Any]:
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         row = self._fetch_one(
             "SELECT * FROM route_preferences WHERE workspace_id = ?",
             (normalized_workspace,),
@@ -1665,7 +1952,7 @@ class DailyRouteService:
             ORDER BY start_at DESC
             LIMIT 1
             """,
-            (workspace_id or DEFAULT_WORKSPACE_ID, schedule_id, start_at),
+            (self._effective_workspace_id(workspace_id), schedule_id, start_at),
         )
 
     def _route_advice_for_schedule(self, workspace_id: str, schedule: dict[str, Any]) -> dict[str, Any]:
@@ -1749,6 +2036,142 @@ class DailyRouteService:
             "message": message,
         }
 
+    def _sync_schedule_row_to_talk_calendar(self, workspace_id: str, schedule: dict[str, Any]) -> dict[str, Any]:
+        normalized_workspace = self._effective_workspace_id(workspace_id)
+        payload = build_talk_calendar_event_payload(schedule)
+        token_result = self.get_kakao_access_token(normalized_workspace)
+        auth_url = token_result.get("auth_url", _kakao_login_url_for_workspace(normalized_workspace))
+        event_id = schedule.get("talk_calendar_event_id", "")
+        if event_id:
+            calendar_result = update_talk_calendar_event_if_configured(
+                event_id,
+                payload,
+                access_token=token_result.get("access_token", ""),
+                auth_url=auth_url,
+            )
+            return {
+                "payload": payload,
+                "calendar_result": calendar_result,
+                "talk_calendar_event_id": event_id if calendar_result.get("updated") else "",
+                "kakao_login_url": calendar_result.get("auth_url", ""),
+            }
+        calendar_result = create_talk_calendar_event_if_configured(
+            payload,
+            access_token=token_result.get("access_token", ""),
+            auth_url=auth_url,
+        )
+        created_event_id = calendar_result.get("event_id", "") if calendar_result.get("created") else ""
+        if created_event_id:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    UPDATE schedules
+                    SET talk_calendar_event_id = ?, updated_at = ?
+                    WHERE workspace_id = ? AND id = ?
+                    """,
+                    (created_event_id, _now_iso(), normalized_workspace, schedule.get("id", "")),
+                )
+                connection.commit()
+        return {
+            "payload": payload,
+            "calendar_result": calendar_result,
+            "talk_calendar_event_id": created_event_id,
+            "kakao_login_url": calendar_result.get("auth_url", ""),
+        }
+
+    def _auto_watch_for_schedule(
+        self,
+        workspace_id: str,
+        schedule: dict[str, Any],
+        route_advice: dict[str, Any],
+    ) -> dict[str, Any]:
+        start = _parse_iso_datetime(schedule.get("start_at", ""))
+        if not start:
+            return {"created": False, "reason": "시작 시간이 없어 자동 알림을 만들지 않았습니다."}
+        origin = route_advice.get("origin", "") if route_advice.get("checked") else ""
+        if not origin and not schedule.get("location_text"):
+            return {"created": False, "reason": "장소가 없어 자동 알림을 만들지 않았습니다."}
+        check_minutes = 120 if origin else 15
+        existing = self._fetch_one(
+            """
+            SELECT *
+            FROM route_watch_jobs
+            WHERE workspace_id = ?
+              AND schedule_id = ?
+              AND status = 'active'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (workspace_id, schedule.get("id", "")),
+        )
+        if existing:
+            return {
+                "created": False,
+                "watch_id": existing.get("id", ""),
+                "next_check_time": existing.get("next_check_time", ""),
+                "reason": "이미 활성화된 자동 경로/일정 알림이 있습니다.",
+            }
+        return self.create_route_watch(
+            workspace_id=workspace_id,
+            schedule_id=schedule.get("id", ""),
+            origin=origin,
+            check_minutes_before=check_minutes,
+            buffer_minutes=int(route_advice.get("buffer_minutes") or 15),
+            notify_channel="kakao_me",
+        )
+
+    def _errand_route_plan_for_schedule(
+        self,
+        workspace_id: str,
+        schedule: dict[str, Any],
+        route_advice: dict[str, Any],
+        errands: list[str],
+    ) -> dict[str, Any]:
+        if not errands:
+            return {}
+        preferences = self._route_preferences(workspace_id)
+        origin = route_advice.get("origin") or preferences.get("home_location", "")
+        destination = schedule.get("location_text") or schedule.get("location", "")
+        if not origin or not destination:
+            return {
+                "planned": False,
+                "detected_errands": errands,
+                "warning": "심부름은 감지했지만, 출발지 또는 목적지가 부족해 경로 근처 장소 추천을 보류했습니다.",
+                "next_step": "manage_route_preferences로 home_location을 저장하거나 출발지를 알려주세요.",
+            }
+        places_plan = self.find_places_on_route(
+            workspace_id=workspace_id,
+            origin=origin,
+            destination=destination,
+            errands=errands,
+            max_detour_minutes=15,
+            preferred_area=_area_token(destination),
+        )
+        start = _parse_iso_datetime(schedule.get("start_at", ""))
+        selected_route = places_plan.get("route_evaluation", {}).get("selected_route", {})
+        travel_minutes = int(selected_route.get("duration_minutes") or route_advice.get("estimated_travel_minutes") or 50)
+        extra_minutes = int(places_plan.get("estimated_extra_time") or 0)
+        buffer_minutes = int(route_advice.get("buffer_minutes") or preferences.get("buffer_minutes") or 15)
+        departure = (
+            (start - timedelta(minutes=travel_minutes + extra_minutes + buffer_minutes)).astimezone(KST).isoformat(timespec="minutes")
+            if start
+            else ""
+        )
+        return {
+            "planned": True,
+            "detected_errands": errands,
+            "origin": origin,
+            "destination": destination,
+            "places_plan": places_plan,
+            "recommended_departure_time": departure,
+            "summary": (
+                f"{destination} 가는 길에 {', '.join(errands)}를 처리할 수 있는 경유지를 추천했습니다. "
+                f"우회 포함 {departure}쯤 출발하는 편이 안전합니다."
+                if departure
+                else places_plan.get("summary", "")
+            ),
+        }
+
     def save_schedule(
         self,
         workspace_id: str,
@@ -1766,13 +2189,90 @@ class DailyRouteService:
         raw_text: str = "",
         notes: str = "",
     ) -> dict[str, Any]:
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         resolved_start_at = start_at
         if not resolved_start_at:
             _, date_iso = _extract_date_info(date_text)
             _, time_hm = _extract_time_info(time_text)
             resolved_start_at = _build_datetime(date_iso, time_hm)
         resolved_end_at = end_at or _infer_end_at(resolved_start_at, schedule_type)
+        duplicate = self._find_duplicate_schedule(
+            normalized_workspace,
+            title,
+            resolved_start_at,
+            date_text,
+            time_text,
+            location_text,
+        )
+        if duplicate:
+            now = _now_iso()
+            merged_raw_text = "\n".join(
+                part
+                for part in (duplicate.get("raw_text", ""), _normalize_spaces(raw_text))
+                if part
+            )
+            merged_notes = "\n".join(
+                part
+                for part in (duplicate.get("notes", ""), _normalize_spaces(notes))
+                if part
+            )
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    UPDATE schedules
+                    SET title = ?, end_at = ?, raw_text = ?, notes = ?, updated_at = ?
+                    WHERE workspace_id = ? AND id = ?
+                    """,
+                    (
+                        _normalize_spaces(title) or duplicate.get("title", ""),
+                        resolved_end_at or duplicate.get("end_at", ""),
+                        merged_raw_text,
+                        merged_notes,
+                        now,
+                        normalized_workspace,
+                        duplicate["id"],
+                    ),
+                )
+                connection.commit()
+            updated_duplicate = self._fetch_one(
+                "SELECT * FROM schedules WHERE workspace_id = ? AND id = ?",
+                (normalized_workspace, duplicate["id"]),
+            ) or duplicate
+            route_advice = self._route_advice_for_schedule(normalized_workspace, updated_duplicate)
+            sync_result = self._sync_schedule_row_to_talk_calendar(normalized_workspace, updated_duplicate) if save_to_talk_calendar else {}
+            errand_route_plan = self._errand_route_plan_for_schedule(
+                normalized_workspace,
+                updated_duplicate,
+                route_advice,
+                _extract_errands_from_text(" ".join([raw_text, title])),
+            )
+            auto_route_watch = self._auto_watch_for_schedule(normalized_workspace, updated_duplicate, route_advice)
+            calendar_result = sync_result.get("calendar_result", {})
+            warning_parts = ["이미 비슷한 일정이 있어 새로 만들지 않고 기존 일정을 업데이트했습니다."]
+            if calendar_result.get("message"):
+                warning_parts.append(calendar_result["message"])
+            if route_advice.get("checked") and route_advice.get("risk_level") == "high":
+                warning_parts.append(route_advice["message"])
+            return {
+                "saved": True,
+                "schedule_id": duplicate["id"],
+                "schedule": self._schedule_to_public_dict(updated_duplicate),
+                "summary": f"'{updated_duplicate['title']}' 일정은 중복으로 판단해 기존 일정을 업데이트했습니다.",
+                "deduplicated": True,
+                "updated_existing": True,
+                "conflict_detected": False,
+                "conflict_candidates": [],
+                "warning": " ".join(warning_parts),
+                "talk_calendar_payload": sync_result.get("payload", {}),
+                "calendar_result": calendar_result,
+                "calendar_sync_recommended": not save_to_talk_calendar,
+                "calendar_prompt": "톡캘린더에도 연동할까요? 원하면 sync_to_talk_calendar를 실행하세요." if not save_to_talk_calendar else "",
+                "kakao_login_url": sync_result.get("kakao_login_url", ""),
+                "route_advice": route_advice,
+                "errand_route_plan": errand_route_plan,
+                "auto_route_watch": auto_route_watch,
+                "next_recommended_action": errand_route_plan.get("summary") or route_advice.get("message") or "기존 일정을 업데이트했습니다.",
+            }
 
         conflict_candidates = self._find_schedule_conflicts(
             normalized_workspace,
@@ -1808,8 +2308,12 @@ class DailyRouteService:
                 "warning": warning,
                 "talk_calendar_payload": {},
                 "calendar_result": {},
+                "calendar_sync_recommended": False,
+                "calendar_prompt": "",
                 "kakao_login_url": "",
                 "route_advice": {},
+                "errand_route_plan": {},
+                "auto_route_watch": {},
                 "next_recommended_action": "기존 일정을 조정하거나 allow_conflict=true로 다시 저장하세요.",
             }
 
@@ -1855,39 +2359,30 @@ class DailyRouteService:
 
         saved_schedule = {
             "id": schedule_id,
+            "workspace_id": normalized_workspace,
             "title": title,
             "start_at": resolved_start_at,
             "end_at": resolved_end_at,
+            "date_text": date_text,
+            "time_text": time_text,
             "location_text": location_text,
             "location": location_text,
             "latitude": coordinate_info.get("latitude"),
             "longitude": coordinate_info.get("longitude"),
             "reminder_minutes": reminder_minutes,
+            "talk_calendar_event_id": "",
         }
         route_advice = self._route_advice_for_schedule(normalized_workspace, saved_schedule)
-        talk_payload = build_talk_calendar_event_payload(saved_schedule) if save_to_talk_calendar else {}
-        token_result = self.get_kakao_access_token(normalized_workspace) if save_to_talk_calendar else {}
-        calendar_result = (
-            create_talk_calendar_event_if_configured(
-                talk_payload,
-                access_token=token_result.get("access_token", ""),
-                auth_url=token_result.get("auth_url", _kakao_login_url_for_workspace(normalized_workspace)),
-            )
-            if save_to_talk_calendar
-            else {}
+        sync_result = self._sync_schedule_row_to_talk_calendar(normalized_workspace, saved_schedule) if save_to_talk_calendar else {}
+        talk_payload = sync_result.get("payload", {}) if save_to_talk_calendar else {}
+        calendar_result = sync_result.get("calendar_result", {}) if save_to_talk_calendar else {}
+        errand_route_plan = self._errand_route_plan_for_schedule(
+            normalized_workspace,
+            saved_schedule,
+            route_advice,
+            _extract_errands_from_text(" ".join([raw_text, title])),
         )
-        calendar_event_id = calendar_result.get("event_id", "") if calendar_result.get("created") else ""
-        if calendar_event_id:
-            with self._connect() as connection:
-                connection.execute(
-                    """
-                    UPDATE schedules
-                    SET talk_calendar_event_id = ?, updated_at = ?
-                    WHERE workspace_id = ? AND id = ?
-                    """,
-                    (calendar_event_id, _now_iso(), normalized_workspace, schedule_id),
-                )
-                connection.commit()
+        auto_route_watch = self._auto_watch_for_schedule(normalized_workspace, saved_schedule, route_advice)
         warning = ""
         if conflict_detected:
             first = conflict_candidates[0]
@@ -1907,23 +2402,32 @@ class DailyRouteService:
             warning = f"{warning} {calendar_result['message']}".strip()
         if route_advice.get("checked") and route_advice.get("risk_level") == "high":
             warning = f"{warning} {route_advice['message']}".strip()
+        if errand_route_plan.get("warning"):
+            warning = f"{warning} {errand_route_plan['warning']}".strip()
 
         return {
             "saved": True,
             "schedule_id": schedule_id,
+            "schedule": self._schedule_to_public_dict(self._fetch_one("SELECT * FROM schedules WHERE workspace_id = ? AND id = ?", (normalized_workspace, schedule_id)) or saved_schedule),
             "summary": f"'{title}' 일정을 저장했습니다.",
+            "deduplicated": False,
+            "updated_existing": False,
             "conflict_detected": conflict_detected,
             "conflict_candidates": conflict_candidates,
             "warning": warning or None,
             "talk_calendar_payload": talk_payload,
             "calendar_result": calendar_result,
-            "kakao_login_url": calendar_result.get("auth_url", "") if calendar_result else "",
+            "calendar_sync_recommended": not save_to_talk_calendar,
+            "calendar_prompt": "톡캘린더에도 연동할까요? 원하면 sync_to_talk_calendar를 실행하세요." if not save_to_talk_calendar else "",
+            "kakao_login_url": sync_result.get("kakao_login_url", "") if save_to_talk_calendar else _kakao_login_url_for_workspace(normalized_workspace),
             "route_advice": route_advice,
-            "next_recommended_action": route_advice.get("message") or "필요하면 check_day_feasibility로 하루 전체 동선을 확인하세요.",
+            "errand_route_plan": errand_route_plan,
+            "auto_route_watch": auto_route_watch,
+            "next_recommended_action": errand_route_plan.get("summary") or route_advice.get("message") or "톡캘린더 연동이 필요하면 sync_to_talk_calendar를 실행하세요.",
         }
 
     def list_schedules(self, workspace_id: str, date_text: str = "", limit: int = 50) -> dict[str, Any]:
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         bounded_limit = max(1, min(int(limit or 50), 100))
         if date_text:
             rows = self._fetch_all(
@@ -1965,7 +2469,7 @@ class DailyRouteService:
         notes: str = "",
         allow_conflict: bool = False,
     ) -> dict[str, Any]:
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         existing = self._fetch_one(
             "SELECT * FROM schedules WHERE workspace_id = ? AND id = ?",
             (normalized_workspace, schedule_id),
@@ -2042,31 +2546,69 @@ class DailyRouteService:
             (normalized_workspace, schedule_id),
         ) or {}
         route_advice = self._route_advice_for_schedule(normalized_workspace, updated)
+        sync_result = (
+            self._sync_schedule_row_to_talk_calendar(normalized_workspace, updated)
+            if updated.get("talk_calendar_event_id")
+            else {}
+        )
+        auto_route_watch = self._auto_watch_for_schedule(normalized_workspace, updated, route_advice)
+        warning_parts: list[str] = []
+        if route_advice.get("risk_level") == "high":
+            warning_parts.append(route_advice.get("message", ""))
+        if sync_result.get("calendar_result", {}).get("message") and not sync_result.get("calendar_result", {}).get("updated"):
+            warning_parts.append(sync_result["calendar_result"]["message"])
         return {
             "updated": True,
             "schedule": self._schedule_to_public_dict(updated),
             "conflict_detected": bool(conflicts),
             "conflict_candidates": conflicts,
             "route_advice": route_advice,
+            "calendar_result": sync_result.get("calendar_result", {}),
+            "kakao_login_url": sync_result.get("kakao_login_url", ""),
+            "auto_route_watch": auto_route_watch,
             "summary": "일정을 수정했습니다.",
-            "warning": route_advice.get("message") if route_advice.get("risk_level") == "high" else None,
+            "warning": " ".join(part for part in warning_parts if part) or None,
         }
 
     def delete_schedule(self, workspace_id: str, schedule_id: str) -> dict[str, Any]:
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         existing = self._fetch_one(
             "SELECT * FROM schedules WHERE workspace_id = ? AND id = ?",
             (normalized_workspace, schedule_id),
         )
         if not existing:
             return {"deleted": False, "summary": "해당 워크스페이스에서 삭제할 일정을 찾지 못했습니다.", "warning": "schedule_id를 확인하세요."}
+        token_result = self.get_kakao_access_token(normalized_workspace) if existing.get("talk_calendar_event_id") else {}
+        calendar_result = (
+            delete_talk_calendar_event_if_configured(
+                existing.get("talk_calendar_event_id", ""),
+                access_token=token_result.get("access_token", ""),
+                auth_url=token_result.get("auth_url", _kakao_login_url_for_workspace(normalized_workspace)),
+            )
+            if existing.get("talk_calendar_event_id")
+            else {}
+        )
         with self._connect() as connection:
             connection.execute(
                 "DELETE FROM schedules WHERE workspace_id = ? AND id = ?",
                 (normalized_workspace, schedule_id),
             )
+            connection.execute(
+                "UPDATE route_watch_jobs SET status = 'cancelled', updated_at = ? WHERE workspace_id = ? AND schedule_id = ?",
+                (_now_iso(), normalized_workspace, schedule_id),
+            )
             connection.commit()
-        return {"deleted": True, "schedule": self._schedule_to_public_dict(existing), "summary": f"'{existing['title']}' 일정을 삭제했습니다."}
+        warning = None
+        if calendar_result and not calendar_result.get("deleted"):
+            warning = calendar_result.get("message")
+        return {
+            "deleted": True,
+            "schedule": self._schedule_to_public_dict(existing),
+            "calendar_result": calendar_result,
+            "kakao_login_url": calendar_result.get("auth_url", "") if calendar_result else "",
+            "summary": f"'{existing['title']}' 일정을 삭제했습니다.",
+            "warning": warning,
+        }
 
     def check_schedule_conflict(
         self,
@@ -2078,7 +2620,7 @@ class DailyRouteService:
         time_text: str,
         location_text: str,
     ) -> dict[str, Any]:
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         resolved_start_at = start_at
         if not resolved_start_at:
             _, date_iso = _extract_date_info(date_text)
@@ -2101,57 +2643,48 @@ class DailyRouteService:
         }
 
     def connect_kakao_calendar(self, workspace_id: str) -> dict[str, Any]:
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         auth_status = self.kakao_auth_status(normalized_workspace)
+        pending_count = self._pending_talk_calendar_schedule_count(normalized_workspace)
         return {
             "authenticated": bool(auth_status.get("authenticated")),
             "workspace_id": normalized_workspace,
             "kakao_login_url": auth_status.get("login_url") or _kakao_login_url_for_workspace(normalized_workspace),
+            "pending_local_schedule_count": pending_count,
             "summary": "카카오 캘린더 연동 상태를 확인했습니다.",
-            "warning": None if auth_status.get("authenticated") else "로그인 URL에서 카카오 동의를 완료해야 톡캘린더에 저장할 수 있습니다.",
+            "warning": (
+                f"연동 후 기존 로컬 일정 {pending_count}건을 자동으로 톡캘린더에 동기화합니다."
+                if auth_status.get("authenticated") and pending_count
+                else None if auth_status.get("authenticated") else "로그인 URL에서 카카오 동의를 완료해야 톡캘린더에 저장할 수 있습니다."
+            ),
         }
 
     def sync_schedule_to_talk_calendar(self, workspace_id: str, schedule_id: str) -> dict[str, Any]:
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         schedule = self._fetch_one(
             "SELECT * FROM schedules WHERE workspace_id = ? AND id = ?",
             (normalized_workspace, schedule_id),
         )
         if not schedule:
             return {"synced": False, "summary": "해당 워크스페이스에서 일정을 찾지 못했습니다.", "warning": "schedule_id를 확인하세요."}
-        payload = build_talk_calendar_event_payload(schedule)
-        token_result = self.get_kakao_access_token(normalized_workspace)
-        calendar_result = create_talk_calendar_event_if_configured(
-            payload,
-            access_token=token_result.get("access_token", ""),
-            auth_url=token_result.get("auth_url", _kakao_login_url_for_workspace(normalized_workspace)),
-        )
-        event_id = calendar_result.get("event_id", "") if calendar_result.get("created") else ""
-        if event_id:
-            with self._connect() as connection:
-                connection.execute(
-                    """
-                    UPDATE schedules
-                    SET talk_calendar_event_id = ?, updated_at = ?
-                    WHERE workspace_id = ? AND id = ?
-                    """,
-                    (event_id, _now_iso(), normalized_workspace, schedule_id),
-                )
-                connection.commit()
+        sync_result = self._sync_schedule_row_to_talk_calendar(normalized_workspace, schedule)
+        calendar_result = sync_result.get("calendar_result", {})
+        event_id = sync_result.get("talk_calendar_event_id", "")
         return {
-            "synced": bool(calendar_result.get("created")),
+            "synced": bool(calendar_result.get("created") or calendar_result.get("updated")),
             "schedule_id": schedule_id,
             "talk_calendar_event_id": event_id,
             "calendar_result": calendar_result,
-            "kakao_login_url": calendar_result.get("auth_url", ""),
+            "kakao_login_url": sync_result.get("kakao_login_url", ""),
             "summary": calendar_result.get("message", "톡캘린더 동기화를 시도했습니다."),
-            "warning": None if calendar_result.get("created") else calendar_result.get("message"),
+            "warning": None if calendar_result.get("created") or calendar_result.get("updated") else calendar_result.get("message"),
         }
 
     def _schedules_for_date(self, workspace_id: str, target_date: str) -> list[dict[str, Any]]:
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         rows = self._fetch_all(
             "SELECT * FROM schedules WHERE workspace_id = ? ORDER BY start_at, time_text",
-            (workspace_id or DEFAULT_WORKSPACE_ID,),
+            (normalized_workspace,),
         )
         return [
             row
@@ -2167,7 +2700,8 @@ class DailyRouteService:
         travel_mode: TravelMode,
         buffer_minutes: int,
     ) -> dict[str, Any]:
-        schedules = self._schedules_for_date(workspace_id, target_date)
+        normalized_workspace = self._effective_workspace_id(workspace_id)
+        schedules = self._schedules_for_date(normalized_workspace, target_date)
         warnings: list[str] = []
         route_checks: list[dict[str, Any]] = []
         impossible_segments: list[dict[str, Any]] = []
@@ -2236,6 +2770,23 @@ class DailyRouteService:
         max_detour_minutes: int,
         preferred_area: str,
     ) -> dict[str, Any]:
+        normalized_workspace = self._effective_workspace_id(workspace_id)
+        preferences = self._route_preferences(normalized_workspace)
+        origin = _normalize_spaces(origin) or preferences.get("home_location", "")
+        destination = _normalize_spaces(destination)
+        if not origin or not destination:
+            return {
+                "recommended_route": "출발지 또는 도착지 확인 필요",
+                "selected_places": [],
+                "rejected_places": [],
+                "estimated_extra_time": 0,
+                "route_evaluation": {
+                    "provider": "missing_location",
+                    "reason": "MCP 서버는 사용자 기기 GPS를 자동으로 읽을 수 없어 기본 출발지나 목적지가 필요합니다.",
+                },
+                "warning": "출발지와 도착지를 확인해야 경로 근처 장소를 추천할 수 있습니다.",
+                "summary": "장소 정보가 부족해 경유지 추천을 보류했습니다.",
+            }
         if _mock_mode() or not _local_api_key():
             selected_places: list[dict[str, Any]] = []
             rejected_places: list[dict[str, Any]] = []
@@ -2337,7 +2888,7 @@ class DailyRouteService:
         destination: str,
         preferences: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         route_profile_id = f"profile_{uuid4().hex[:10]}"
         now = _now_iso()
         preferences = preferences or {}
@@ -2411,7 +2962,7 @@ class DailyRouteService:
         }
 
     def list_route_profiles(self, workspace_id: str, limit: int) -> dict[str, Any]:
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         rows = self._fetch_all(
             """
             SELECT * FROM route_profiles
@@ -2451,7 +3002,7 @@ class DailyRouteService:
         category: str,
         preferred_area: str,
     ) -> dict[str, Any]:
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         errand_id = f"errand_{uuid4().hex[:10]}"
         inferred_category, label = _errand_category(errand_text)
         resolved_category = _normalize_spaces(category) or inferred_category
@@ -2489,7 +3040,7 @@ class DailyRouteService:
         }
 
     def list_errands(self, workspace_id: str, limit: int) -> dict[str, Any]:
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         errands = self._fetch_all(
             """
             SELECT * FROM errands
@@ -2516,6 +3067,7 @@ class DailyRouteService:
         preferred_buffer_minutes: int | None,
         avoid_conditions: list[str],
     ) -> dict[str, Any]:
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         routine_id = f"routine_{uuid4().hex[:10]}"
         now = _now_iso()
         with self._connect() as connection:
@@ -2529,7 +3081,7 @@ class DailyRouteService:
                 """,
                 (
                     routine_id,
-                    workspace_id or DEFAULT_WORKSPACE_ID,
+                    normalized_workspace,
                     _normalize_spaces(routine_name),
                     routine_type,
                     _normalize_spaces(rule_text),
@@ -2550,7 +3102,7 @@ class DailyRouteService:
             "how_it_will_be_used": "일일 브리핑과 경유지 추천에서 선호 출발지, 목적지, 여유 시간을 반영합니다.",
             "routine": {
                 "id": routine_id,
-                "workspace_id": workspace_id or DEFAULT_WORKSPACE_ID,
+                "workspace_id": normalized_workspace,
                 "routine_name": _normalize_spaces(routine_name),
                 "routine_type": routine_type,
                 "rule_text": _normalize_spaces(rule_text),
@@ -2565,7 +3117,7 @@ class DailyRouteService:
         }
 
     def list_routines(self, workspace_id: str, limit: int) -> dict[str, Any]:
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         rows = self._fetch_all(
             """
             SELECT * FROM routines
@@ -2615,10 +3167,11 @@ class DailyRouteService:
         extra_errands: list[str],
         send_to_me: bool,
     ) -> dict[str, Any]:
-        schedules = self._schedules_for_date(workspace_id, target_date)
+        normalized_workspace = self._effective_workspace_id(workspace_id)
+        schedules = self._schedules_for_date(normalized_workspace, target_date)
         routines = self._fetch_all(
             "SELECT * FROM routines WHERE workspace_id = ? ORDER BY created_at DESC",
-            (workspace_id or DEFAULT_WORKSPACE_ID,),
+            (normalized_workspace,),
         )
         preferred_buffer = next(
             (
@@ -2628,9 +3181,9 @@ class DailyRouteService:
             ),
             15,
         )
-        feasibility = self.check_day_feasibility(workspace_id, target_date, start_location, "car", int(preferred_buffer or 15))
+        feasibility = self.check_day_feasibility(normalized_workspace, target_date, start_location, "car", int(preferred_buffer or 15))
         errands_plan = self.find_places_on_route(
-            workspace_id,
+            normalized_workspace,
             start_location or "출발지",
             end_location or "도착지",
             extra_errands,
@@ -2683,12 +3236,12 @@ class DailyRouteService:
                 errands_plan["summary"],
             ]
         )
-        token_result = self.get_kakao_access_token(workspace_id) if send_to_me else {}
+        token_result = self.get_kakao_access_token(normalized_workspace) if send_to_me else {}
         send_result = (
             send_message_to_me_if_configured(
                 message,
                 access_token=token_result.get("access_token", ""),
-                auth_url=token_result.get("auth_url", _kakao_login_url_for_workspace(workspace_id or DEFAULT_WORKSPACE_ID)),
+                auth_url=token_result.get("auth_url", _kakao_login_url_for_workspace(normalized_workspace)),
             )
             if send_to_me
             else {"sent": False}
@@ -2725,7 +3278,7 @@ class DailyRouteService:
         buffer_minutes: int,
         notify_channel: NotifyChannel,
     ) -> dict[str, Any]:
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         schedule = self._fetch_one(
             "SELECT * FROM schedules WHERE workspace_id = ? AND id = ?",
             (normalized_workspace, schedule_id),
@@ -2746,6 +3299,27 @@ class DailyRouteService:
                 "summary": "시작 시간이 없는 일정에는 경로 감시를 만들 수 없습니다.",
                 "next_check_time": "",
                 "warning": "start_at이 있는 일정으로 다시 시도하세요.",
+            }
+        existing = self._fetch_one(
+            """
+            SELECT *
+            FROM route_watch_jobs
+            WHERE workspace_id = ?
+              AND schedule_id = ?
+              AND status = 'active'
+              AND origin = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (normalized_workspace, schedule_id, _normalize_spaces(origin)),
+        )
+        if existing:
+            return {
+                "created": True,
+                "watch_id": existing["id"],
+                "summary": f"'{schedule['title']}' 일정의 경로 감시가 이미 등록되어 있습니다.",
+                "next_check_time": existing.get("next_check_time", ""),
+                "warning": None,
             }
         watch_id = f"watch_{uuid4().hex[:10]}"
         next_check_time = (start - timedelta(minutes=check_minutes_before)).isoformat(timespec="seconds")
@@ -2781,6 +3355,36 @@ class DailyRouteService:
             "warning": warning,
         }
 
+    def _next_route_watch_time(
+        self,
+        start: datetime | None,
+        origin: str,
+        destination: str,
+        travel_minutes: int,
+        buffer_minutes: int,
+        after: datetime,
+    ) -> str:
+        if not start:
+            return ""
+        candidates = [
+            start - timedelta(minutes=120),
+            start - timedelta(minutes=60),
+            start - timedelta(minutes=30),
+            start - timedelta(minutes=15),
+        ]
+        if origin and destination and travel_minutes:
+            candidates.append(start - timedelta(minutes=travel_minutes + buffer_minutes + 15))
+        seen: set[str] = set()
+        future_candidates: list[datetime] = []
+        for candidate in sorted(candidates):
+            key = candidate.isoformat(timespec="minutes")
+            if key in seen:
+                continue
+            seen.add(key)
+            if candidate > after:
+                future_candidates.append(candidate)
+        return future_candidates[0].isoformat(timespec="seconds") if future_candidates else ""
+
     def run_due_route_watches(self, workspace_id: str = "") -> list[dict[str, Any]]:
         now = datetime.now(KST).isoformat(timespec="seconds")
         normalized_workspace = _normalize_spaces(workspace_id)
@@ -2810,25 +3414,71 @@ class DailyRouteService:
         for job in jobs:
             start = _parse_iso_datetime(job.get("start_at", ""))
             remaining = int((start - datetime.now(KST)).total_seconds() // 60) if start else 0
-            route = estimate_route_duration(job["origin"], job["location_text"])
-            risk = route["duration_minutes"] + job["buffer_minutes"] > remaining
-            risk_level = "high" if risk else "low"
-            message = (
-                f"{job['origin']}에서 {job['location_text']}까지 {route['duration_minutes']}분 예상입니다. "
-                f"남은 시간 {remaining}분 기준으로 {'지각 위험이 있습니다' if risk else '이동 가능해 보입니다'}."
+            origin = job.get("origin", "")
+            destination = job.get("location_text", "")
+            moving_schedule = bool(origin and destination)
+            route = (
+                estimate_route_duration(origin, destination)
+                if moving_schedule
+                else {
+                    "duration_minutes": 0,
+                    "distance_meters": 0,
+                    "mode": "일정 시작 알림",
+                    "provider": "local_reminder",
+                    "travel_mode": "none",
+                }
             )
-            token_result = self.get_kakao_access_token(job["workspace_id"]) if job.get("notify_channel") == "kakao_me" and risk else {}
+            buffer_minutes = int(job.get("buffer_minutes") or 15)
+            required_minutes = int(route.get("duration_minutes") or 0) + buffer_minutes
+            risk = moving_schedule and required_minutes > remaining
+            departure_reminder_due = moving_schedule and remaining <= required_minutes + 15
+            schedule_reminder_due = not moving_schedule and remaining <= 15
+            should_notify = risk or departure_reminder_due or schedule_reminder_due
+            if risk:
+                risk_level = "high"
+                message = (
+                    f"도로 상황 기준 {origin}에서 {destination}까지 예상 이동 {route['duration_minutes']}분, "
+                    f"여유 {buffer_minutes}분이 필요합니다. 남은 시간은 {remaining}분이라 지각 위험이 높습니다."
+                )
+            elif departure_reminder_due:
+                risk_level = "medium"
+                message = (
+                    f"'{job['title']}' 일정 이동 15분 전 알림입니다. "
+                    f"{origin}에서 {destination}까지 예상 이동 {route['duration_minutes']}분이므로 곧 출발하는 편이 안전합니다."
+                )
+            elif schedule_reminder_due:
+                risk_level = "medium"
+                message = f"'{job['title']}' 일정 시작 15분 전입니다."
+            elif moving_schedule:
+                risk_level = "low"
+                message = (
+                    f"{origin}에서 {destination}까지 {route['duration_minutes']}분 예상입니다. "
+                    f"남은 시간 {remaining}분 기준으로 아직 이동 가능해 보입니다."
+                )
+            else:
+                risk_level = "low"
+                message = f"'{job['title']}' 일정까지 {remaining}분 남았습니다."
+            token_result = self.get_kakao_access_token(job["workspace_id"]) if job.get("notify_channel") == "kakao_me" and should_notify else {}
             notify_result = (
                 send_message_to_me_if_configured(
                     message,
                     access_token=token_result.get("access_token", ""),
                     auth_url=token_result.get("auth_url", _kakao_login_url_for_workspace(job["workspace_id"])),
                 )
-                if job.get("notify_channel") == "kakao_me" and risk
+                if job.get("notify_channel") == "kakao_me" and should_notify
                 else {"sent": False}
             )
             log_id = f"alert_{uuid4().hex[:10]}"
             created_at = _now_iso()
+            next_check_time = self._next_route_watch_time(
+                start,
+                origin,
+                destination,
+                int(route.get("duration_minutes") or 0),
+                buffer_minutes,
+                datetime.now(KST) + timedelta(seconds=5),
+            )
+            next_status = "active" if next_check_time else "checked"
             with self._connect() as connection:
                 connection.execute(
                     """
@@ -2844,14 +3494,14 @@ class DailyRouteService:
                         job["schedule_id"],
                         risk_level,
                         message,
-                        route["duration_minutes"],
+                        int(route.get("duration_minutes") or 0),
                         remaining,
                         created_at,
                     ),
                 )
                 connection.execute(
-                    "UPDATE route_watch_jobs SET status = 'checked', updated_at = ? WHERE id = ?",
-                    (created_at, job["id"]),
+                    "UPDATE route_watch_jobs SET status = ?, next_check_time = ?, updated_at = ? WHERE id = ?",
+                    (next_status, next_check_time, created_at, job["id"]),
                 )
                 connection.commit()
             logs.append(
@@ -2863,19 +3513,22 @@ class DailyRouteService:
                     "message": message,
                     "sent_to_me": bool(notify_result.get("sent")),
                     "notify_warning": notify_result.get("warning"),
+                    "next_check_time": next_check_time,
                     "created_at": created_at,
                 }
             )
         return logs
 
     def get_route_alerts(self, workspace_id: str, limit: int) -> dict[str, Any]:
-        normalized_workspace = workspace_id or DEFAULT_WORKSPACE_ID
+        normalized_workspace = self._effective_workspace_id(workspace_id)
         self.run_due_route_watches(normalized_workspace)
         alerts = self._fetch_all(
             """
             SELECT * FROM route_check_logs
             WHERE workspace_id = ?
-            ORDER BY created_at DESC
+            ORDER BY
+                CASE risk_level WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+                created_at DESC
             LIMIT ?
             """,
             (normalized_workspace, limit),
